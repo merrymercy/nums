@@ -133,3 +133,6 @@ build
 scratch
 notebooks
 data
+
+# vim swap files
+*.swp

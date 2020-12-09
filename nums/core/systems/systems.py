@@ -246,3 +246,35 @@ class RaySystem(System):
                 addresses[grid_entry] = node_key
                 index = (index + 1) % len(nodes)
         return addresses
+
+
+class GPUSystem(object):
+    def __init__(self, engine):
+        self.num_gpus = 1
+        self.engine = engine
+
+    def init(self):
+        print("GPUSystem init")
+        pass
+
+    def shutdown(self):
+        print("GPUSystem shutdown")
+        pass
+
+    def register(self, name: str, func: callable, remote_params: dict = None):
+        pass
+
+    def get_rng(self, seed) -> RNGInterface:
+        from nums.core.systems import numpy_compute
+        self.rng_cls = numpy_compute.RNG
+        return self.rng_cls(seed)
+
+    def put(self, value: Any):
+        return self.engine.put(value)
+
+    def get(self, object_ids: Union[Any, List]):
+        return self.engine.get(object_ids)
+
+    def bop(self, *args, **kwargs):
+        return self.engine.bop(*args, **kwargs)
+
