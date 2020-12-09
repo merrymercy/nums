@@ -19,24 +19,22 @@ def check_block_integrity(arr):
         assert arr.blocks[grid_entry].rect == arr.grid.get_slice_tuples(grid_entry)
         assert arr.blocks[grid_entry].shape == arr.grid.get_block_shape(grid_entry)
 
-def benchmark_func(func, repeat=10, warmup=1):
+def benchmark_func(func, repeat=2, warmup=1):
     for i in range(warmup):
         func()
 
     costs = []
     for i in range(repeat):
-        tic = time.time()
-        func()
-        toc = time.time()
-        costs.append(toc - tic)
+        cost = func()
+        costs.append(cost)
 
     return costs
 
 
 def benchmark_tensordot(num_gpus, engine_class_list):
     # Compute answer with numpy
-    N = 4096
-    block_shape = 2048
+    N = 8192
+    block_shape = 4096
     dtype = np.float32
 
     a = np.random.uniform(size=(N, N)).astype(dtype)
@@ -52,13 +50,18 @@ def benchmark_tensordot(num_gpus, engine_class_list):
         def func():
             block_a = app_inst.array(a, block_shape=(block_shape, block_shape))
             block_b = app_inst.array(b, block_shape=(block_shape, block_shape))
+            block_a.get()
+            block_b.get()
+            tic = time.time()
             block_c = block_a.tensordot(block_b, axes=1)
+            block_c = block_c.tensordot(block_b, axes=1)
             res = block_c.get()
-            return res
+            toc = time.time()
+            return toc - tic
 
-        # check correctness
-        res = func()
-        assert np.allclose(res, c)
+#        # check correctness
+#        res = func()
+#        assert np.allclose(res, c)
 
         costs = benchmark_func(func)
         print(
@@ -68,15 +71,15 @@ def benchmark_tensordot(num_gpus, engine_class_list):
 
 
 if __name__ == "__main__":
-    num_gpus = 1
+    num_gpus = 4
 
     ray.init(num_gpus=num_gpus)
 
     benchmark_tensordot(1, [
         # NumpySerialEngine,
-        # CupySerialEngine,
+        CupySerialEngine,
         # NumpyRayEngine,
-        # CupyRayEngine,
+        CupyRayEngine,
         # TorchGPURayEngine,
         # CupyOsActorEngine,
         CupyNcclActorEngine,

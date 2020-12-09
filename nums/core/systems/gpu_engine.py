@@ -413,8 +413,12 @@ class GPUActorEngine(object):
         return obj_ref
 
     def __del__(self):
-        for actor in self.gpu_actors:
-            ray.kill(actor)
+        print("self", self)
+        try:
+            for actor in self.gpu_actors:
+                ray.kill(actor)
+        except Exception as e:
+            print("Get exception during __del__. Ignored.")
 
 
 class CupyNcclActorEngine(GPUActorEngine):
