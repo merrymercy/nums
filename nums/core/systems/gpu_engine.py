@@ -4,6 +4,8 @@ import numpy as np
 import ray
 
 def bop_common(op, a1, a2, a1_shape, a2_shape, a1_T, a2_T, axes, syskwargs):
+    # print(op, a1.shape, a2.shape)
+
     if a1_T:
         a1 = a1.T
     if a2_T:
@@ -16,10 +18,10 @@ def bop_common(op, a1, a2, a1_shape, a2_shape, a1_T, a2_T, axes, syskwargs):
     arr_lib = sys.modules[str(a1.__class__.__module__).split('.')[0]]
 
     if op == "tensordot":
-        #return arr_lib.tensordot(a1, a2, dims=axes)
-        return arr_lib.tensordot(a1, a2, axes=axes)
+        ret = arr_lib.tensordot(a1, a2, axes=axes)
     elif op == "add":
-        return arr_lib.add(a1, a2)
+        ret = arr_lib.add(a1, a2)
+    return ret
 
 
 ##############################################################
@@ -37,6 +39,13 @@ class RayEngine(object):
 
     def bop(self, *args, **kwargs):
         return self.bop_task.remote(*args, **kwargs)
+
+    def touch(self, object_id, syskwargs):
+        ray.wait([object_id])
+        return object_id
+
+    def shutdown(self):
+        pass
 
 
 class NumpyRayEngine(RayEngine):
@@ -78,6 +87,13 @@ class SerialEngine(object):
     def bop(self, *args, **kwargs):
         return bop_common(*args, **kwargs)
 
+    def touch(self, object_id, syskwargs):
+        self.get(object_id)
+        return object_id
+
+    def shutdown(self):
+        pass
+
 
 class NumpySerialEngine(SerialEngine):
     def __init__(self, num_gpus):
@@ -106,12 +122,13 @@ class CupySerialEngine(SerialEngine):
         else:
             return x.get()
 
+    def shutdown(self):
+        mempool = self.cp.get_default_memory_pool()
+        mempool.free_all_blocks()
 
 ##############################################################
 ########### RayActorEngien: Serial implementation ############
 ##############################################################
-
-
 from typing import Union, List
 from collections import namedtuple
 import uuid
@@ -123,6 +140,7 @@ from ray.actor import ActorHandle
 
 
 ArrayRef = namedtuple("ArrayRef", ["uid", "shape", "dtype"])
+UID_MAX_LEN = 3
 
 
 @ray.remote(num_gpus=1)
@@ -179,9 +197,10 @@ class GPUActor:
             self.comm = self.cp_nccl.NcclCommunicator(
                 self.world_size, self.cupy_nccl_uid, self.world_rank
             )
+        self.cuda_sync()
 
     def put(self, data) -> ArrayRef:
-        uid = str(uuid.uuid4())
+        uid = str(uuid.uuid4())[:UID_MAX_LEN]
         if self.arr_lib == "torch":
             data = self.torch.tensor(data, device="cuda:0")
         elif self.arr_lib == "cupy":
@@ -199,7 +218,7 @@ class GPUActor:
         return data
 
     def bop(self, *args, **kwargs):
-        uid = str(uuid.uuid4())
+        uid = str(uuid.uuid4())[:UID_MAX_LEN]
 
         new_args = []
         for arg in args:
@@ -208,7 +227,9 @@ class GPUActor:
             else:
                 new_args.append(arg)
 
+
         ret = bop_common(*new_args, **kwargs)
+        # print("actor %d: %s = %s %s %s" % (self.world_rank, uid, args[0], args[1].uid, args[2].uid))
 
         self._register_new_array(uid, ret)
         self.cuda_sync()
@@ -271,8 +292,12 @@ class GPUActor:
         self.gc_nbytes += nbytes
         self.gc_list.append(uid)
 
+        # print("actor %d : register %s (%s)" % (self.world_rank, uid, str(data.shape)))
+
+        # print("actor %d : mem size %.1f MB" % (self.world_rank, self.gc_nbytes / 1024/1024))
+
         if self.gc_nbytes >= 8 * (1 << 30):
-            split = int(len(self.gc_list) * 0.8)
+            split = int(len(self.gc_list) * 0.2)
             to_del = self.gc_list[:split]
             self.gc_list = self.gc_list[split:]
 
@@ -280,6 +305,14 @@ class GPUActor:
                 self.gc_nbytes -= self._get_bytes(self.arrays[uid])
                 del self.arrays[uid]
 
+
+def get_flatten_id(grid_entry, grid_shape):
+    ret = 0
+    for i in range(len(grid_entry)):
+        dim = 1 if i == len(grid_entry) - 1 else grid_shape[i+1]
+        ret = (ret + grid_entry[i]) * dim
+
+    return ret
 
 
 class GPUActorEngine(object):
@@ -321,12 +354,22 @@ class GPUActorEngine(object):
         self.actor_ct = 0
 
     def put(self, data) -> ObjectRef:
-        self.actor_ct = (self.actor_ct + 1) % len(self.gpu_actors)
-        dst_actor = self.gpu_actors[self.actor_ct]
+        #self.actor_ct = (self.actor_ct + 1) % len(self.gpu_actors)
+        #dst_actor = self.gpu_actors[self.actor_ct]
+        #obj_ref = dst_actor.put.remote(data)
+        #return self._register_new_array(obj_ref, dst_actor)
 
-        obj_ref = dst_actor.put.remote(data)
+        actor0 = self.gpu_actors[0]
+        obj_ref = actor0.put.remote(data)
+        self._register_new_array(obj_ref, actor0)
 
-        return self._register_new_array(obj_ref, dst_actor)
+        dist_tasks = []
+        for i in range(1, len(self.gpu_actors)):
+            ref = self._distribute_to(obj_ref, self.gpu_actors[i])
+            dist_tasks.append(ref)
+        ray.get(dist_tasks)
+
+        return obj_ref
 
     def get(self, obj_ref: Union[ObjectRef, List[ObjectRef]]):
         if isinstance(obj_ref, ObjectRef):
@@ -341,18 +384,19 @@ class GPUActorEngine(object):
             ]
             return ray.get(obj_refs)
 
-    def bop(self, *args, **kwargs) -> ObjectRef:
-        self.actor_ct = (self.actor_ct + 1) % len(self.gpu_actors)
-        dst_actor = self.gpu_actors[self.actor_ct]
+    def touch(self, obj_ref, syskwargs):
+        actor = self.obj_ref_to_owner[obj_ref]
+        obj_ref = actor.get.remote(obj_ref)
+        return ray.wait([obj_ref])
 
-        new_args = []
-        for arg in args:
-            if isinstance(arg, np.ndarray):
-                new_args.append(self._distribute_to(arg, dst_actor))
-            else:
-                new_args.append(arg)
+    def bop(self, op, a1, a2, a1_shape, a2_shape, a1_T, a2_T, axes, syskwargs) -> ObjectRef:
+        gid = get_flatten_id(syskwargs['grid_entry'], syskwargs['grid_shape'])
+        dst_actor = self.gpu_actors[gid % len(self.gpu_actors)]
 
-        obj_ref = dst_actor.bop.remote(*new_args, **kwargs)
+        a1 = self._distribute_to(a1, dst_actor)
+        a2 = self._distribute_to(a2, dst_actor)
+
+        obj_ref = dst_actor.bop.remote(op, a1, a2, a1_shape, a2_shape, a1_T, a2_T, axes, None)
         return self._register_new_array(obj_ref, dst_actor)
 
 
@@ -400,6 +444,7 @@ class GPUActorEngine(object):
         dst_rank,
         lock,
     ) -> ArrayRef:
+        # print("GPUEngine send %s from %d to %d" % (arr_ref.uid, src_rank, dst_rank))
         ray.get(
             dst_actor.recv_obj_store.remote(
                 arr_ref, src_actor.send_obj_store.remote(arr_ref)
@@ -412,13 +457,14 @@ class GPUActorEngine(object):
         self.distribution_dict[(obj_ref, owner)] = obj_ref
         return obj_ref
 
-    def __del__(self):
-        print("self", self)
-        try:
-            for actor in self.gpu_actors:
-                ray.kill(actor)
-        except Exception as e:
-            print("Get exception during __del__. Ignored.")
+    def shutdown(self):
+        for actor in self.gpu_actors:
+            ray.kill(actor)
+        del self.gpu_actors
+        del self.actor_to_rank
+        del self.obj_ref_to_owner
+        del self.distribution_dict
+        del self.comm_pair_lock
 
 
 class CupyNcclActorEngine(GPUActorEngine):

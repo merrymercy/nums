@@ -250,16 +250,13 @@ class RaySystem(System):
 
 class GPUSystem(object):
     def __init__(self, engine):
-        self.num_gpus = 1
         self.engine = engine
 
     def init(self):
-        print("GPUSystem init")
         pass
 
     def shutdown(self):
-        print("GPUSystem shutdown")
-        pass
+        self.engine.shutdown()
 
     def register(self, name: str, func: callable, remote_params: dict = None):
         pass
@@ -277,4 +274,8 @@ class GPUSystem(object):
 
     def bop(self, *args, **kwargs):
         return self.engine.bop(*args, **kwargs)
+
+    def touch(self, object_id, syskwargs):
+        self.engine.touch(object_id, syskwargs)
+        return object_id
 
