@@ -414,6 +414,8 @@ class BlockArray(BlockArrayBase):
             return self.tensordot(other, 1)
 
     def tensordot(self, other, axes=2):
+        print("BlockArray::tensordot", self.shape, other.shape, "block shape", self.block_shape)
+
         if not isinstance(other, BlockArray):
             raise ValueError("Cannot automatically construct BlockArray for tensor operations.")
 

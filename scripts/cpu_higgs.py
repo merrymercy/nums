@@ -1,3 +1,10 @@
+"""
+log:
+BlockArray::tensordot (11000000, 29) (29,) block shape (76389, 28)
+BlockArray::tensordot (29, 11000000) (11000000,) block shape (28, 76389)
+BlockArray::tensordot (29, 11000000) (11000000, 29) block shape (28, 76389)
+BlockArray::tensordot (29, 29) (29,) block shape (28, 28)
+"""
 import time
 
 import nums
