@@ -7,11 +7,11 @@ import ray
 import nums
 from nums.core.array.application import ArrayApplication
 from nums.core.systems import numpy_compute
-from nums.core.systems.systems import SerialSystem, GPUSystem
+from nums.core.systems.systems import SerialSystem
 from nums.core.systems.filesystem import FileSystem
-from nums.core.systems.gpu_engine import (
-    NumpySerialEngine, CupySerialEngine, NumpyRayEngine, CupyRayEngine,
-    TorchCPURayEngine, TorchGPURayEngine, CupyOsActorEngine, CupyNcclActorEngine
+from nums.core.systems.gpu_systems import (
+    NumpySerialSystem, CupySerialSystem, NumpyRaySystem, CupyRaySystem,
+    TorchCPURaySystem, TorchGPURaySystem, CupyOsActorSystem, CupyNcclActorSystem
 )
 
 def check_block_integrity(arr):
@@ -20,62 +20,82 @@ def check_block_integrity(arr):
         assert arr.blocks[grid_entry].rect == arr.grid.get_slice_tuples(grid_entry)
         assert arr.blocks[grid_entry].shape == arr.grid.get_block_shape(grid_entry)
 
-def benchmark_func(func, repeat=1, warmup=1):
+
+def benchmark_func(func, repeat=2, warmup=1):
     for i in range(warmup):
         func()
 
     costs = []
     for i in range(repeat):
-        cost = func()
+        cost = func()[0]
         costs.append(cost)
 
     return costs
 
 
-def benchmark_tensordot(num_gpus, engine_class_list):
+def benchmark_tensordot(num_gpus, system_class_list):
     # Compute answer with numpy
-    array_shape = (20000, 20000)
-    block_shape = (10000, 10000)
-    #array_shape = (8000, 8000)
-    #block_shape = (4000, 4000)
+    if False:
+        N, d = 10000, 1000
+        N_block = N // num_gpus
+        d_block = d // 1
+    else:
+        N, d = 1000, 1000
+        N_block = N // 2
+        d_block = d // 2
     dtype = np.float32
 
-    a = np.random.uniform(size=array_shape).astype(dtype)
-    b = np.random.uniform(size=array_shape).astype(dtype)
-    # c = np.tensordot(a, b, axes=1)
+    a_np = np.random.uniform(size=(N, d)).astype(dtype)
+    b_np = np.random.uniform(size=(d, N)).astype(dtype)
+    # c_np = np.tensordot(a_np, b_np, axes=1)
     print("np init array generated")
 
     # Benchmark engines
-    for engine_class in engine_class_list:
-        def func():
-            system = GPUSystem(engine=engine_class(num_gpus))
+    for system_class in system_class_list:
+        if system_class:
+            system = system_class(num_gpus)
             system.init()
             app_inst = ArrayApplication(system=system, filesystem=FileSystem(system))
 
-            block_a = app_inst.array(a, block_shape=block_shape)
-            block_b = app_inst.array(b, block_shape=block_shape)
-            block_a.touch()
-            block_b.touch()
+            block_a = app_inst.array(a_np, block_shape=(d_block, N_block))
+            block_b = app_inst.array(b_np, block_shape=(N_block, d_block))
 
-            tic = time.time()
-            block_c = block_a.tensordot(block_b, axes=1)
-            block_c = block_c.tensordot(block_c, axes=1)
-            block_c.touch()
-            toc = time.time()
+            def func():
+                tic = time.time()
+                block_c = block_a.tensordot(block_b, axes=1)
+                block_c.touch()
+                toc = time.time()
+                del block_c
+                return toc - tic, None
 
-            del (block_a, block_b, block_c, app_inst)
+            costs = benchmark_func(func)
+
+            del (block_a, block_b, app_inst)
             system.shutdown()
-            return toc - tic
+        else:
+            import cupy as cp
 
-        # check correctness
-        # res = func()
-        # exit()
-        # assert np.allclose(res, c)
+            a_cp = cp.array(a_np)
+            b_cp = cp.array(b_np)
+            cp.cuda.Device(0).synchronize()
 
-        costs = benchmark_func(func)
+            def func():
+                tic = time.time()
+                c_cp = cp.tensordot(a_cp, b_cp, axes=1)
+                cp.cuda.Device(0).synchronize()
+                toc = time.time()
+
+                del c_cp
+                return toc - tic, None
+
+            costs = benchmark_func(func)
+
+            del (a_cp, b_cp)
+
         print(
-            "Lib: %s\tCost: %.2f  (CV: %.2f)"
-            % (engine_class.__name__, np.mean(costs), np.std(costs) / np.mean(costs))
+            "Lib: %s\tCost: %.4f  (CV: %.2f)"
+            % (system_class.__name__ if system_class else "None",
+              np.mean(costs), np.std(costs) / np.mean(costs))
         )
 
 
@@ -85,12 +105,13 @@ if __name__ == "__main__":
     ray.init(num_gpus=num_gpus)
 
     benchmark_tensordot(num_gpus, [
-        # NumpySerialEngine,
-        CupySerialEngine,
-        # NumpyRayEngine,
-        # CupyRayEngine,
-        # TorchGPURayEngine,
-        # CupyOsActorEngine,
-        # CupyNcclActorEngine,
+        # NumpySerialSystem,
+        CupySerialSystem,
+        # NumpyRaySystem,
+        # CupyRaySystem,
+        # TorchGPURaySystem,
+        # CupyOsActorSystem,
+        # CupyNcclActorSystem,
+        None,
     ])
 

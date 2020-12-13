@@ -6,37 +6,55 @@ import ray
 
 from nums.core.systems import numpy_compute
 from nums.core.settings import np_ufunc_map
+from nums.core.systems.interfaces import RNGInterface
+from nums.core.systems.utils import extract_functions
 
-##############################################################
-############ SerialEngine: Serial implementation #############
-##############################################################
-class SerialEngine(object):
+class BaseGPUSystem(object):
     def __init__(self):
-        # Init ComputeInterface
         for name in ['random_block', 'new_block', 'update_block', 'create_block',
-                     'sum_reduce', 'map_uop', 'reshape', 'inv', 'empty', 'reduce_axis',
-                     'astype', 'bop']:
-            setattr(self, name, functools.partial(self.generic_compute_interface, name))
+            'sum_reduce', 'map_uop', 'reshape', 'inv', 'empty', 'reduce_axis',
+            'astype', 'bop']:
+            setattr(self, name, functools.partial(self.call_compute_interface, name))
 
-    def bop(self, *args, **kwargs):
-        return bop_common(*args, **kwargs)
+    def get_rng(self, seed) -> RNGInterface:
+        from nums.core.systems import numpy_compute
+        self.rng_cls = numpy_compute.RNG
+        return self.rng_cls(seed)
+
+    def init(self):
+        pass
+
+    def shutdown(self):
+        pass
+
+    def register(self, name: str, func: callable, remote_params: dict = None):
+        pass
+
+    def call_compute_interface(self, name, *args, **kwargs):
+        raise NotImplementedError
+
+
+##############################################################
+############ SerialSystem: Serial implementation #############
+##############################################################
+class SerialSystem(BaseGPUSystem):
+    def __init__(self, compute_module):
+        # Init ComputeInterface
+        self.compute_imp = compute_module.ComputeCls()
+        super().__init__()
 
     def touch(self, object_id, syskwargs):
         self.get(object_id)
         return object_id
 
-    def shutdown(self):
-        pass
-
-    def generic_compute_interface(self, name, *args, **kwargs):
+    def call_compute_interface(self, name, *args, **kwargs):
         del kwargs['syskwargs']
         return getattr(self.compute_imp, name)(*args, **kwargs)
 
 
-class NumpySerialEngine(SerialEngine):
+class NumpySerialSystem(SerialSystem):
     def __init__(self, num_gpus):
-        self.compute_imp = numpy_compute.ComputeCls()
-        super().__init__()
+        super().__init__(numpy_compute)
 
     def put(self, x):
         return x
@@ -44,15 +62,14 @@ class NumpySerialEngine(SerialEngine):
     def get(self, x):
         return x
 
-class CupySerialEngine(SerialEngine):
+
+class CupySerialSystem(SerialSystem):
     def __init__(self, num_gpus):
         import cupy as cp
         from nums.core.systems import cupy_compute
 
         self.cp = cp
-        self.compute_imp = cupy_compute.ComputeCls()
-
-        super().__init__()
+        super().__init__(cupy_compute)
 
     def put(self, x):
         return self.cp.array(x)
@@ -70,20 +87,17 @@ class CupySerialEngine(SerialEngine):
 
 
 ##############################################################
-##### RayEngine: Use the scheduler + object store in Ray #####
+##### RaySystem: Use the scheduler + object store in Ray #####
 ##############################################################
-class RayEngine(object):
-    def __init__(self, num_gpus):
-        pass
+class RaySystem(BaseGPUSystem):
+    def __init__(self):
+        super().__init__()
 
     def put(self, x):
         return ray.put(x)
 
     def get(self, x):
         return ray.get(x)
-
-    def bop(self, *args, **kwargs):
-        return self.bop_task.remote(*args, **kwargs)
 
     def touch(self, object_id, syskwargs):
         ray.wait([object_id])
@@ -92,39 +106,47 @@ class RayEngine(object):
     def shutdown(self):
         pass
 
-
-class NumpyRayEngine(RayEngine):
-    @ray.remote
-    def bop_task(*args, **kwargs):
-        return bop_common(*args, **kwargs)
+    def call_compute_interface(self, name, *args, **kwargs):
+        del kwargs['syskwargs']
+        return self.compute_imp_funcs[name].remote(*args, **kwargs)
 
 
-class CupyRayEngine(RayEngine):
-    @ray.remote(num_gpus=1)
-    def bop_task(*args, **kwargs):
+class NumpyRaySystem(RaySystem):
+    def __init__(self, num_gpus=None):
+        self.compute_imp_funcs = extract_functions(numpy_compute.ComputeCls)
+        for name in self.compute_imp_funcs:
+            self.compute_imp_funcs[name] = ray.remote(self.compute_imp_funcs[name])
+        super().__init__()
+
+
+class CupyRaySystem(RaySystem):
+    def __init__(self, num_gpus=None):
         import cupy as cp
+        from nums.core.systems import cupy_compute
+        self.compute_imp_funcs = extract_functions(cupy_compute.ComputeCls)
 
-        args = [cp.array(x) if isinstance(x, np.ndarray) else x for x in args]
-        return bop_common(*args, **kwargs).get()
+        for name in self.compute_imp_funcs:
+            raw_func = self.compute_imp_funcs[name]
+            def _func(raw_func):
+                @ray.remote(num_gpus=1)
+                def local_func(*args, **kwargs):
+                    args = [cp.array(x) if isinstance(x, np.ndarray) else x for x in args]
+                    return raw_func(*args, **kwargs).get()
+
+                self.compute_imp_funcs[name] = local_func
+            _func(raw_func)
+
+        super().__init__()
 
 
-class TorchCPURayEngine(RayEngine):
-    @ray.remote
-    def bop_task(*args, **kwargs):
-        import torch
-
-        args = [torch.tensor(x) if isinstance(x, np.ndarray) else x for x in args]
-        return bop_common(*args, **kwargs).numpy()
+class TorchCPURaySystem(RaySystem):
+    def __int__(self):
+        raise NotImplementedError
 
 
-class TorchGPURayEngine(RayEngine):
-    @ray.remote(num_gpus=1)
-    def bop_task(*args, **kwargs):
-        import torch
-
-        args = [torch.tensor(x, device='cuda:0') if isinstance(x, np.ndarray) else x for x in args]
-        return bop_common(*args, **kwargs).cpu().numpy()
-
+class TorchGPURaySystem(RaySystem):
+    def __int__(self):
+        raise NotImplementedError
 
 ##############################################################
 ######### RayActorEngien: Use actors to manage GPUs ##########
@@ -169,13 +191,16 @@ class GPUActor:
             self.torch = torch
             self.torch_dist = dist
             self.cuda_sync = self.cuda_sync_torch
+            self.compute_imp = None
         elif self.arr_lib == "cupy":
             import cupy as cp
             import cupy.cuda.nccl as nccl
+            from nums.core.systems import cupy_compute
 
             self.cp = cp
             self.cp_nccl = nccl
             self.cuda_sync = self.cuda_sync_cupy
+            self.compute_imp = cupy_compute.ComputeCls()
 
             self.ARR_DTYPE_TO_NCCL_DTYPE = {
                 cp.int32: nccl.NCCL_INT32,
@@ -217,7 +242,10 @@ class GPUActor:
             data = self.arrays[arr_ref.uid].get()
         return data
 
-    def bop(self, *args, **kwargs):
+    def touch(self, arr_ref: ArrayRef):
+        self.cuda_sync()
+
+    def call_compute_interface(self, name, *args, **kwargs):
         uid = str(uuid.uuid4())[:UID_MAX_LEN]
 
         new_args = []
@@ -226,10 +254,7 @@ class GPUActor:
                 new_args.append(self.arrays[arg.uid])
             else:
                 new_args.append(arg)
-
-
-        ret = bop_common(*new_args, **kwargs)
-        # print("actor %d: %s = %s %s %s" % (self.world_rank, uid, args[0], args[1].uid, args[2].uid))
+        ret = getattr(self.compute_imp, name)(*new_args, **kwargs)
 
         self._register_new_array(uid, ret)
         self.cuda_sync()
@@ -315,10 +340,11 @@ def get_flatten_id(grid_entry, grid_shape):
     return ret
 
 
-class GPUActorEngine(object):
+class GPUActorSystem(BaseGPUSystem):
     def __init__(self, num_gpus, arr_lib="torch", comm_lib="nccl"):
         self.arr_lib = arr_lib
 
+        # Launch actors
         if self.arr_lib == "torch":
             cluster_file = "tcp://localhost:%d" % np.random.randint(10000, 20000)
             self.gpu_actors = [
@@ -338,20 +364,23 @@ class GPUActorEngine(object):
         else:
             raise ValueError("Invalid arr_lib: " + self.arr_lib)
 
+        # Meta info about actors and communication lock
         self.actor_to_rank = {self.gpu_actors[i]: i for i in range(num_gpus)}
-
         self.obj_ref_to_owner = {}  # ObjectRef -> ActorHandle
         self.distribution_dict = {}  # (ObjectRef, ActorHandle) -> ObjectRef
         self.comm_pair_lock = {}  # (rank, rank) -> ObjectRef
 
+        # Setup communication library
         if comm_lib == "nccl":
-            self.copy_task = GPUActorEngine._copy_task_nccl
+            self.copy_task = GPUActorSystem._copy_task_nccl
         else:
-            self.copy_task = GPUActorEngine._copy_task_obj_store
+            self.copy_task = GPUActorSystem._copy_task_obj_store
 
-        # setup communication library
         ray.get([actor.setup.remote() for actor in self.gpu_actors])
         self.actor_ct = 0
+
+        # Init ComputeInterface
+        super().__init__()
 
     def put(self, data) -> ObjectRef:
         #self.actor_ct = (self.actor_ct + 1) % len(self.gpu_actors)
@@ -386,19 +415,23 @@ class GPUActorEngine(object):
 
     def touch(self, obj_ref, syskwargs):
         actor = self.obj_ref_to_owner[obj_ref]
-        obj_ref = actor.get.remote(obj_ref)
-        return ray.wait([obj_ref])
+        ray.wait([actor.touch.remote(obj_ref)])
+        return obj_ref
 
-    def bop(self, op, a1, a2, a1_shape, a2_shape, a1_T, a2_T, axes, syskwargs) -> ObjectRef:
+    def call_compute_interface(self, name, *args, **kwargs) -> ObjectRef:
+        syskwargs = kwargs.pop('syskwargs')
         gid = get_flatten_id(syskwargs['grid_entry'], syskwargs['grid_shape'])
         dst_actor = self.gpu_actors[gid % len(self.gpu_actors)]
 
-        a1 = self._distribute_to(a1, dst_actor)
-        a2 = self._distribute_to(a2, dst_actor)
+        new_args = []
+        for arg in args:
+            if isinstance(arg, ObjectRef):
+                new_args.append(self._distribute_to(arg, dst_actor))
+            else:
+                new_args.append(arg)
+        obj_ref = dst_actor.call_compute_interface.remote(name, *new_args, **kwargs)
 
-        obj_ref = dst_actor.bop.remote(op, a1, a2, a1_shape, a2_shape, a1_T, a2_T, axes, None)
         return self._register_new_array(obj_ref, dst_actor)
-
 
     def _distribute_to(self, obj_ref: ObjectRef, dst: ActorHandle) -> ObjectRef:
         ret = self.distribution_dict.get((obj_ref, dst), None)
@@ -444,7 +477,7 @@ class GPUActorEngine(object):
         dst_rank,
         lock,
     ) -> ArrayRef:
-        # print("GPUEngine send %s from %d to %d" % (arr_ref.uid, src_rank, dst_rank))
+        print("GPUSystem send %s from %d to %d" % (arr_ref.uid, src_rank, dst_rank))
         ray.get(
             dst_actor.recv_obj_store.remote(
                 arr_ref, src_actor.send_obj_store.remote(arr_ref)
@@ -467,22 +500,22 @@ class GPUActorEngine(object):
         del self.comm_pair_lock
 
 
-class CupyNcclActorEngine(GPUActorEngine):
+class CupyNcclActorSystem(GPUActorSystem):
     def __init__(self, num_gpus):
         super().__init__(num_gpus, arr_lib="cupy", comm_lib="nccl")
 
 
-class CupyOsActorEngine(GPUActorEngine):
+class CupyOsActorSystem(GPUActorSystem):
     def __init__(self, num_gpus):
         super().__init__(num_gpus, arr_lib="cupy", comm_lib="object_store")
 
 
-class TorchNcclActorEngine(GPUActorEngine):
+class TorchNcclActorSystem(GPUActorSystem):
     def __init__(self, num_gpus):
         super().__init__(num_gpus, arr_lib="torch", comm_lib="nccl")
 
 
-class TorchOsActorEngine(GPUActorEngine):
+class TorchOsActorSystem(GPUActorSystem):
     def __init__(self, num_gpus):
         super().__init__(num_gpus, arr_lib="torch", comm_lib="object_store")
 
