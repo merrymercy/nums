@@ -80,7 +80,7 @@ def benchmark_tensordot(num_gpus, engine_class_list):
 
 
 if __name__ == "__main__":
-    num_gpus = 4
+    num_gpus = 1
 
     ray.init(num_gpus=num_gpus)
 
@@ -91,6 +91,6 @@ if __name__ == "__main__":
         # CupyRayEngine,
         # TorchGPURayEngine,
         # CupyOsActorEngine,
-        CupyNcclActorEngine,
+        # CupyNcclActorEngine,
     ])
 

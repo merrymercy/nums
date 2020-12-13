@@ -17,6 +17,7 @@
 import inspect
 from types import ModuleType, FunctionType
 from typing import Any, Union, List, Dict
+import functools
 
 import ray
 import numpy as np
@@ -252,6 +253,12 @@ class GPUSystem(object):
     def __init__(self, engine):
         self.engine = engine
 
+        # Init ComputeInterface
+        for name in ['touch', 'random_block', 'new_block', 'update_block', 'create_block',
+                     'bop', 'sum_reduce', 'map_uop', 'reshape', 'inv', 'empty', 'reduce_axis',
+                     'astype']:
+            setattr(self, name, getattr(self.engine, name))
+
     def init(self):
         pass
 
@@ -271,11 +278,3 @@ class GPUSystem(object):
 
     def get(self, object_ids: Union[Any, List]):
         return self.engine.get(object_ids)
-
-    def bop(self, *args, **kwargs):
-        return self.engine.bop(*args, **kwargs)
-
-    def touch(self, object_id, syskwargs):
-        self.engine.touch(object_id, syskwargs)
-        return object_id
-

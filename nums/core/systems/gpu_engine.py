@@ -1,27 +1,72 @@
 import sys
+import functools
 
 import numpy as np
 import ray
 
-def bop_common(op, a1, a2, a1_shape, a2_shape, a1_T, a2_T, axes, syskwargs):
-    # print(op, a1.shape, a2.shape)
+from nums.core.systems import numpy_compute
+from nums.core.settings import np_ufunc_map
 
-    if a1_T:
-        a1 = a1.T
-    if a2_T:
-        a2 = a2.T
-    if a1.shape != a1_shape:
-        a1 = a1.reshape(a1_shape)
-    if a2.shape != a2_shape:
-        a2 = a2.reshape(a2_shape)
+##############################################################
+############ SerialEngine: Serial implementation #############
+##############################################################
+class SerialEngine(object):
+    def __init__(self):
+        # Init ComputeInterface
+        for name in ['random_block', 'new_block', 'update_block', 'create_block',
+                     'sum_reduce', 'map_uop', 'reshape', 'inv', 'empty', 'reduce_axis',
+                     'astype', 'bop']:
+            setattr(self, name, functools.partial(self.generic_compute_interface, name))
 
-    arr_lib = sys.modules[str(a1.__class__.__module__).split('.')[0]]
+    def bop(self, *args, **kwargs):
+        return bop_common(*args, **kwargs)
 
-    if op == "tensordot":
-        ret = arr_lib.tensordot(a1, a2, axes=axes)
-    elif op == "add":
-        ret = arr_lib.add(a1, a2)
-    return ret
+    def touch(self, object_id, syskwargs):
+        self.get(object_id)
+        return object_id
+
+    def shutdown(self):
+        pass
+
+    def generic_compute_interface(self, name, *args, **kwargs):
+        del kwargs['syskwargs']
+        return getattr(self.compute_imp, name)(*args, **kwargs)
+
+
+class NumpySerialEngine(SerialEngine):
+    def __init__(self, num_gpus):
+        self.compute_imp = numpy_compute.ComputeCls()
+        super().__init__()
+
+    def put(self, x):
+        return x
+
+    def get(self, x):
+        return x
+
+class CupySerialEngine(SerialEngine):
+    def __init__(self, num_gpus):
+        import cupy as cp
+        from nums.core.systems import cupy_compute
+
+        self.cp = cp
+        self.compute_imp = cupy_compute.ComputeCls()
+
+        super().__init__()
+
+    def put(self, x):
+        return self.cp.array(x)
+
+    def get(self, x):
+        self.cp.cuda.Device(0).synchronize()
+        if isinstance(x, list):
+            return [a.get() for a in x]
+        else:
+            return x.get()
+
+    def shutdown(self):
+        mempool = self.cp.get_default_memory_pool()
+        mempool.free_all_blocks()
 
 
 ##############################################################
@@ -80,54 +125,9 @@ class TorchGPURayEngine(RayEngine):
         args = [torch.tensor(x, device='cuda:0') if isinstance(x, np.ndarray) else x for x in args]
         return bop_common(*args, **kwargs).cpu().numpy()
 
-##############################################################
-############ SerialEngine: Serial implementation #############
-##############################################################
-class SerialEngine(object):
-    def bop(self, *args, **kwargs):
-        return bop_common(*args, **kwargs)
-
-    def touch(self, object_id, syskwargs):
-        self.get(object_id)
-        return object_id
-
-    def shutdown(self):
-        pass
-
-
-class NumpySerialEngine(SerialEngine):
-    def __init__(self, num_gpus):
-        pass
-
-    def put(self, x):
-        return x
-
-    def get(self, x):
-        return x
-
-
-class CupySerialEngine(SerialEngine):
-    def __init__(self, num_gpus):
-        import cupy as cp
-
-        self.cp = cp
-
-    def put(self, x):
-        return self.cp.array(x)
-
-    def get(self, x):
-        self.cp.cuda.Device(0).synchronize()
-        if isinstance(x, list):
-            return [a.get() for a in x]
-        else:
-            return x.get()
-
-    def shutdown(self):
-        mempool = self.cp.get_default_memory_pool()
-        mempool.free_all_blocks()
 
 ##############################################################
-########### RayActorEngien: Serial implementation ############
+######### RayActorEngien: Use actors to manage GPUs ##########
 ##############################################################
 from typing import Union, List
 from collections import namedtuple

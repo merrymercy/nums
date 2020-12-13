@@ -43,6 +43,11 @@ def instance():
     return _instance
 
 
+def set_instance(ins):
+    global _instance
+    _instance = ins
+
+
 def create():
     configure_logging()
 
