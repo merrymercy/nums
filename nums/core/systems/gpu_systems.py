@@ -130,7 +130,8 @@ class CupyRaySystem(RaySystem):
             def _func(raw_func):
                 @ray.remote(num_gpus=1)
                 def local_func(*args, **kwargs):
-                    args = [cp.array(x) if isinstance(x, np.ndarray) else x for x in args]
+                    args = [cp.array(v) if isinstance(v, np.ndarray) else v for v in args]
+                    kwargs = {k: cp.array(v) if isinstance(v, np.ndarray) else v for k, v in kwargs.items()}
                     return raw_func(*args, **kwargs).get()
 
                 self.compute_imp_funcs[name] = local_func
@@ -248,13 +249,12 @@ class GPUActor:
     def call_compute_interface(self, name, *args, **kwargs):
         uid = str(uuid.uuid4())[:UID_MAX_LEN]
 
-        new_args = []
-        for arg in args:
-            if isinstance(arg, ArrayRef):
-                new_args.append(self.arrays[arg.uid])
-            else:
-                new_args.append(arg)
-        ret = getattr(self.compute_imp, name)(*new_args, **kwargs)
+        args = [self.arrays[v.uid]
+                if isinstance(v, ArrayRef) else v for v in args]
+        kwargs = {k: self.arrays[v.uid]
+                if isinstance(v, ArrayRef) else v for k, v in kwargs.items()}
+
+        ret = getattr(self.compute_imp, name)(*args, **kwargs)
 
         self._register_new_array(uid, ret)
         self.cuda_sync()
@@ -423,13 +423,12 @@ class GPUActorSystem(BaseGPUSystem):
         gid = get_flatten_id(syskwargs['grid_entry'], syskwargs['grid_shape'])
         dst_actor = self.gpu_actors[gid % len(self.gpu_actors)]
 
-        new_args = []
-        for arg in args:
-            if isinstance(arg, ObjectRef):
-                new_args.append(self._distribute_to(arg, dst_actor))
-            else:
-                new_args.append(arg)
-        obj_ref = dst_actor.call_compute_interface.remote(name, *new_args, **kwargs)
+        args = [self._distribute_to(v, dst_actor)
+                if isinstance(v, np.ndarray) else v for v in args]
+        kwargs = {k: self._distribute_to(v, dst_actor)
+                if isinstance(v, np.ndarray) else v for k, v in kwargs.items()}
+
+        obj_ref = dst_actor.call_compute_interface.remote(name, *args, **kwargs)
 
         return self._register_new_array(obj_ref, dst_actor)
 
