@@ -10,12 +10,19 @@ from nums.core.systems import numpy_compute
 from nums.core.systems.systems import SerialSystem
 from nums.core.systems.filesystem import FileSystem
 from nums.core.systems.gpu_systems import (
-    NumpySerialSystem, CupySerialSystem, NumpyRaySystem, CupyRaySystem,
-    TorchCPURaySystem, TorchGPURaySystem, CupyOsActorSystem, CupyNcclActorSystem,
+    NumpySerialSystem,
+    CupySerialSystem,
+    NumpyRaySystem,
+    CupyRaySystem,
+    TorchCPURaySystem,
+    TorchGPURaySystem,
+    CupyOsActorSystem,
+    CupyNcclActorSystem,
     CupyParallelSystem,
 )
 
 from utils import benchmark_func, get_number_of_gpus
+
 
 def benchmark_tensordot(num_gpus, system_class_list):
     # Compute answer with numpy
@@ -78,84 +85,108 @@ def benchmark_tensordot(num_gpus, system_class_list):
 
         print(
             "Lib: %s\tCost: %.4f  (CV: %.2f)"
-            % (system_class.__name__ if system_class else "None",
-              np.mean(costs), np.std(costs) / np.mean(costs))
+            % (
+                system_class.__name__ if system_class else "None",
+                np.mean(costs),
+                np.std(costs) / np.mean(costs),
+            )
         )
 
 
-def benchmark_x_T_x(num_gpus, system_class_list):
-    # Compute answer with numpy
-    if True:
-        N, d = 4000000, 1000
-        N_block = N // 4
-        d_block = d // 1
-    else:
-        N, d = 1000, 1000
-        N_block = N // 2
-        d_block = d // 2
+def benchmark_x_T_x(num_gpus, N_list, system_class_list, d=1000):
     dtype = np.float32
 
+    format_string = "%20s,%10s,%10s,%10s"
+    print(format_string % ("Library", "N", "Cost", "CV"))
+
     # Benchmark engines
-    for system_class in system_class_list:
-        if system_class:
-            system = system_class(num_gpus)
-            system.init()
-            app_inst = ArrayApplication(system=system, filesystem=FileSystem(system))
+    for N in N_list:
+        N = int(N)
+        N_block = N // num_gpus
+        d_block = d
+        for system_class in system_class_list:
+            if system_class in ["Cupy", "Numpy"]:
+                name = system_class
+                import cupy as cp
 
-            block_x = app_inst.ones((N, d), block_shape=(N_block, d_block), dtype=dtype)
-            block_x.touch()
+                arr_lib = cp if system_class == "Cupy" else np
 
-            def func():
-                tic = time.time()
-                block_c = block_x.T @ block_x
-                block_c.touch()
-                toc = time.time()
-                del block_c
-                return toc - tic, None
-
-            costs = benchmark_func(func)
-
-            del (block_x, app_inst)
-            system.shutdown()
-        else:
-            import cupy as cp
-
-            x_cp = cp.ones((N, d), dtype=dtype)
-            cp.cuda.Device(0).synchronize()
-
-            def func():
-                tic = time.time()
-                c_cp = x_cp.T @ x_cp
+                x = arr_lib.ones((N, d), dtype=dtype)
                 cp.cuda.Device(0).synchronize()
-                toc = time.time()
 
-                del c_cp
-                return toc - tic, None
+                def func():
+                    tic = time.time()
+                    c = x.T @ x
+                    cp.cuda.Device(0).synchronize()
+                    toc = time.time()
 
-            costs = benchmark_func(func)
+                    del c
+                    return toc - tic, None
 
-            del x_cp
+                costs = benchmark_func(func)
 
-        print(
-            "Lib: %s\tCost: %.4f  (CV: %.2f)"
-            % (system_class.__name__ if system_class else "None",
-              np.mean(costs), np.std(costs) / np.mean(costs))
-        )
+                del x
+            else:
+                name = system_class.__name__
+                system = system_class(num_gpus)
+                system.init()
+                app_inst = ArrayApplication(
+                    system=system, filesystem=FileSystem(system)
+                )
+
+                x = app_inst.ones(
+                    (N, d), block_shape=(N_block, d_block), dtype=dtype
+                )
+                x.touch()
+
+                def func():
+                    tic = time.time()
+                    c = x.T @ x
+                    c.touch()
+                    toc = time.time()
+                    del c
+                    return toc - tic, None
+
+                costs = benchmark_func(func)
+
+                del (x, app_inst)
+                system.shutdown()
+
+            log_str = format_string % (
+                name,
+                "%d" % N,
+                "%.4f" % np.mean(costs),
+                "%.2f" % (np.std(costs) / np.mean(costs)),
+            )
+
+            print(log_str)
+
+            with open("results.csv", "a") as f:
+                f.write(log_str + "\n")
 
 
 if __name__ == "__main__":
     num_gpus = get_number_of_gpus()
     ray.init(num_gpus=num_gpus)
 
-    benchmark_x_T_x(num_gpus, [
-        # NumpySerialSystem,
-        CupySerialSystem,
-        # NumpyRaySystem,
-        # CupyRaySystem,
-        # TorchGPURaySystem,
-        # CupyOsActorSystem,
-        # CupyNcclActorSystem,
-        CupyParallelSystem,
-        None,
-    ])
+    benchmark_x_T_x(
+        num_gpus,
+        N_list=[
+            1e4,
+            1e5,
+            1e6,
+        ],
+        system_class_list=[
+            # NumpySerialSystem,
+            # CupySerialSystem,
+            # NumpyRaySystem,
+            # CupyRaySystem,
+            # TorchGPURaySystem,
+            # CupyOsActorSystem,
+            # CupyNcclActorSystem,
+            CupyParallelSystem,
+            "Cupy",
+            "Numpy",
+        ],
+    )
 
