@@ -13,13 +13,11 @@ from nums.core.systems.gpu_systems import (
 from nums.core.application_manager import set_instance
 from nums.models.glms import LogisticRegression
 
-from benchmark_bop import benchmark_func
-
-# Set instance
+from utils import benchmark_func, get_number_of_gpus
 
 def benchmark_lr(num_gpus, system_class_list):
-    N = 1000
-    d = 28
+    N = 10000
+    d = 1000
 
     for system_class in system_class_list:
         # Init system
@@ -57,15 +55,14 @@ def benchmark_lr(num_gpus, system_class_list):
 
 
 if __name__ == "__main__":
-    num_gpus = 1
-
+    num_gpus = get_number_of_gpus()
     ray.init(num_gpus=num_gpus)
 
     benchmark_lr(num_gpus, [
         # NumpySerialSystem,
         CupySerialSystem,
         # NumpyRaySystem,
-        CupyRaySystem,
+        # CupyRaySystem,
         # TorchGPURaySystem,
         CupyOsActorSystem,
         # CupyNcclActorSystem,

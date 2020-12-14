@@ -1,5 +1,6 @@
 import sys
 import functools
+import time
 
 import numpy as np
 import ray
@@ -43,10 +44,6 @@ class SerialSystem(BaseGPUSystem):
         self.compute_imp = compute_module.ComputeCls()
         super().__init__()
 
-    def touch(self, object_id, syskwargs):
-        self.get(object_id)
-        return object_id
-
     def call_compute_interface(self, name, *args, **kwargs):
         del kwargs['syskwargs']
         return getattr(self.compute_imp, name)(*args, **kwargs)
@@ -61,6 +58,9 @@ class NumpySerialSystem(SerialSystem):
 
     def get(self, x):
         return x
+
+    def touch(self, object_id, syskwargs):
+        return object_id
 
 
 class CupySerialSystem(SerialSystem):
@@ -80,6 +80,10 @@ class CupySerialSystem(SerialSystem):
             return [a.get() for a in x]
         else:
             return x.get()
+
+    def touch(self, object_id, syskwargs):
+        self.cp.cuda.Device(0).synchronize()
+        return object_id
 
     def shutdown(self):
         mempool = self.cp.get_default_memory_pool()
@@ -421,12 +425,13 @@ class GPUActorSystem(BaseGPUSystem):
     def call_compute_interface(self, name, *args, **kwargs) -> ObjectRef:
         syskwargs = kwargs.pop('syskwargs')
         gid = get_flatten_id(syskwargs['grid_entry'], syskwargs['grid_shape'])
-        dst_actor = self.gpu_actors[gid % len(self.gpu_actors)]
+        actor_id = gid % len(self.gpu_actors)
+        dst_actor = self.gpu_actors[actor_id]
 
         args = [self._distribute_to(v, dst_actor)
-                if isinstance(v, np.ndarray) else v for v in args]
+                if isinstance(v, ObjectRef) else v for v in args]
         kwargs = {k: self._distribute_to(v, dst_actor)
-                if isinstance(v, np.ndarray) else v for k, v in kwargs.items()}
+                if isinstance(v, ObjectRef) else v for k, v in kwargs.items()}
 
         obj_ref = dst_actor.call_compute_interface.remote(name, *args, **kwargs)
 
@@ -476,7 +481,7 @@ class GPUActorSystem(BaseGPUSystem):
         dst_rank,
         lock,
     ) -> ArrayRef:
-        print("GPUSystem send %s from %d to %d" % (arr_ref.uid, src_rank, dst_rank))
+        # print("GPUSystem send %s from %d to %d" % (arr_ref.uid, src_rank, dst_rank), flush=True)
         ray.get(
             dst_actor.recv_obj_store.remote(
                 arr_ref, src_actor.send_obj_store.remote(arr_ref)

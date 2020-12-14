@@ -14,39 +14,22 @@ from nums.core.systems.gpu_systems import (
     TorchCPURaySystem, TorchGPURaySystem, CupyOsActorSystem, CupyNcclActorSystem
 )
 
-def check_block_integrity(arr):
-    for grid_entry in arr.grid.get_entry_iterator():
-        assert arr.blocks[grid_entry].grid_entry == grid_entry
-        assert arr.blocks[grid_entry].rect == arr.grid.get_slice_tuples(grid_entry)
-        assert arr.blocks[grid_entry].shape == arr.grid.get_block_shape(grid_entry)
-
-
-def benchmark_func(func, repeat=2, warmup=1):
-    for i in range(warmup):
-        func()
-
-    costs = []
-    for i in range(repeat):
-        cost = func()[0]
-        costs.append(cost)
-
-    return costs
-
+from utils import benchmark_func, get_number_of_gpus
 
 def benchmark_tensordot(num_gpus, system_class_list):
     # Compute answer with numpy
-    if False:
-        N, d = 10000, 1000
-        N_block = N // num_gpus
-        d_block = d // 1
+    if True:
+        N, d = 50000, 5000
+        N_block = N // 2
+        d_block = d // 2
     else:
         N, d = 1000, 1000
         N_block = N // 2
         d_block = d // 2
     dtype = np.float32
 
-    a_np = np.random.uniform(size=(N, d)).astype(dtype)
-    b_np = np.random.uniform(size=(d, N)).astype(dtype)
+    a_np = np.random.uniform(size=(d, N)).astype(dtype)
+    b_np = np.random.uniform(size=(N, d)).astype(dtype)
     # c_np = np.tensordot(a_np, b_np, axes=1)
     print("np init array generated")
 
@@ -100,8 +83,7 @@ def benchmark_tensordot(num_gpus, system_class_list):
 
 
 if __name__ == "__main__":
-    num_gpus = 1
-
+    num_gpus = get_number_of_gpus()
     ray.init(num_gpus=num_gpus)
 
     benchmark_tensordot(num_gpus, [
@@ -111,7 +93,7 @@ if __name__ == "__main__":
         # CupyRaySystem,
         # TorchGPURaySystem,
         # CupyOsActorSystem,
-        # CupyNcclActorSystem,
+        CupyNcclActorSystem,
         None,
     ])
 
