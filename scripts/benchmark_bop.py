@@ -11,7 +11,8 @@ from nums.core.systems.systems import SerialSystem
 from nums.core.systems.filesystem import FileSystem
 from nums.core.systems.gpu_systems import (
     NumpySerialSystem, CupySerialSystem, NumpyRaySystem, CupyRaySystem,
-    TorchCPURaySystem, TorchGPURaySystem, CupyOsActorSystem, CupyNcclActorSystem
+    TorchCPURaySystem, TorchGPURaySystem, CupyOsActorSystem, CupyNcclActorSystem,
+    CupyParallelSystem,
 )
 
 from utils import benchmark_func, get_number_of_gpus
@@ -19,7 +20,7 @@ from utils import benchmark_func, get_number_of_gpus
 def benchmark_tensordot(num_gpus, system_class_list):
     # Compute answer with numpy
     if True:
-        N, d = 50000, 5000
+        N, d = 500000, 1000
         N_block = N // 2
         d_block = d // 2
     else:
@@ -82,18 +83,79 @@ def benchmark_tensordot(num_gpus, system_class_list):
         )
 
 
+def benchmark_x_T_x(num_gpus, system_class_list):
+    # Compute answer with numpy
+    if True:
+        N, d = 4000000, 1000
+        N_block = N // 4
+        d_block = d // 1
+    else:
+        N, d = 1000, 1000
+        N_block = N // 2
+        d_block = d // 2
+    dtype = np.float32
+
+    # Benchmark engines
+    for system_class in system_class_list:
+        if system_class:
+            system = system_class(num_gpus)
+            system.init()
+            app_inst = ArrayApplication(system=system, filesystem=FileSystem(system))
+
+            block_x = app_inst.ones((N, d), block_shape=(N_block, d_block), dtype=dtype)
+            block_x.touch()
+
+            def func():
+                tic = time.time()
+                block_c = block_x.T @ block_x
+                block_c.touch()
+                toc = time.time()
+                del block_c
+                return toc - tic, None
+
+            costs = benchmark_func(func)
+
+            del (block_x, app_inst)
+            system.shutdown()
+        else:
+            import cupy as cp
+
+            x_cp = cp.ones((N, d), dtype=dtype)
+            cp.cuda.Device(0).synchronize()
+
+            def func():
+                tic = time.time()
+                c_cp = x_cp.T @ x_cp
+                cp.cuda.Device(0).synchronize()
+                toc = time.time()
+
+                del c_cp
+                return toc - tic, None
+
+            costs = benchmark_func(func)
+
+            del x_cp
+
+        print(
+            "Lib: %s\tCost: %.4f  (CV: %.2f)"
+            % (system_class.__name__ if system_class else "None",
+              np.mean(costs), np.std(costs) / np.mean(costs))
+        )
+
+
 if __name__ == "__main__":
     num_gpus = get_number_of_gpus()
     ray.init(num_gpus=num_gpus)
 
-    benchmark_tensordot(num_gpus, [
+    benchmark_x_T_x(num_gpus, [
         # NumpySerialSystem,
         CupySerialSystem,
         # NumpyRaySystem,
         # CupyRaySystem,
         # TorchGPURaySystem,
         # CupyOsActorSystem,
-        CupyNcclActorSystem,
+        # CupyNcclActorSystem,
+        CupyParallelSystem,
         None,
     ])
 

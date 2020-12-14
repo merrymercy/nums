@@ -105,11 +105,11 @@ class GLM(object):
         # to maintain the original block shape of X below, along axis 1.
         # Otherwise, the concatenation operation will not construct the new X
         # by referencing X's existing blocks.
-        X = self._app.concatenate([X, self._app.ones(shape=(X.shape[0], 1),
-                                                     block_shape=(X.block_shape[0], 1),
-                                                     dtype=X.dtype)],
-                                  axis=1,
-                                  axis_block_size=X.block_shape[1])
+        #X = self._app.concatenate([X, self._app.ones(shape=(X.shape[0], 1),
+        #                                             block_shape=(X.block_shape[0], 1),
+        #                                             dtype=X.dtype)],
+        #                          axis=1,
+        #                          axis_block_size=X.block_shape[1])
         assert len(X.shape) == 2 and len(y.shape) == 1
         beta: BlockArray = self._app.zeros((X.shape[1],), (X.block_shape[1],), dtype=X.dtype)
         tol: BlockArray = self._app.scalar(self._tol)

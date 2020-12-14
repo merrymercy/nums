@@ -52,7 +52,7 @@ class ArrayApplication(object):
             nodes = system.nodes()
             num_cores = sum(map(lambda n: n["Resources"]["CPU"], nodes))
         else:
-            assert isinstance(self.system, SerialSystem)
+            #assert isinstance(self.system, SerialSystem)
             num_cores = systems_utils.get_num_cores()
         return int(num_cores)
 
@@ -79,6 +79,9 @@ class ArrayApplication(object):
             block_shape = shape
             return block_shape
 
+        if isinstance(self.system):
+            pass
+
         if num_cores is not None:
             pass
         else:
@@ -91,7 +94,7 @@ class ArrayApplication(object):
             # This configuration is the default.
             cluster_shape = self.system.scheduler.cluster_shape
         else:
-            assert isinstance(self.system, SerialSystem)
+            #assert isinstance(self.system, SerialSystem)
             cluster_shape = (1, 1)
 
         if len(shape) < len(cluster_shape):

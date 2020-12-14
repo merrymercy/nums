@@ -1,6 +1,8 @@
 import sys
 import functools
 import time
+import itertools
+import gc
 
 import numpy as np
 import ray
@@ -46,6 +48,10 @@ class SerialSystem(BaseGPUSystem):
 
     def call_compute_interface(self, name, *args, **kwargs):
         del kwargs['syskwargs']
+        #if name in ['bop', 'map_uop']:
+        #    print(f"SerialSystem::call compute {name} {args[0]}")
+        #else:
+        #    print(f"SerialSystem::call compute {name}")
         return getattr(self.compute_imp, name)(*args, **kwargs)
 
 
@@ -89,6 +95,105 @@ class CupySerialSystem(SerialSystem):
         mempool = self.cp.get_default_memory_pool()
         mempool.free_all_blocks()
 
+##############################################################
+########## ParallelSystem: Parallel implementation ###########
+##############################################################
+class CupyParallelSystem(BaseGPUSystem):
+    def __init__(self, num_gpus, local_cache=True):
+        import cupy as cp
+        from nums.core.systems import cupy_compute
+
+        self.cp = cp
+        self.num_gpus = num_gpus
+        self.local_cache = local_cache
+
+        self.compute_imp = cupy_compute.ComputeCls()
+        self.dist_dict = {}   # Dict[(object_id, actor_id) -> actor_id]
+        super().__init__()
+
+    def put(self, x):
+        with self.cp.cuda.Device(0):
+            ret = self.cp.array(x)
+        ret = self._register_new_array(ret, 0)
+
+        for actor_id in range(1, self.num_gpus):
+            self._distribute_to(ret, actor_id)
+
+        return ret
+
+    def get(self, x):
+        if isinstance(x, list):
+            return [a.get() for a in x]
+        else:
+            return x.get()
+
+    def touch(self, object_id, syskwargs):
+        object_id.device.synchronize()
+        return object_id
+
+    def call_compute_interface(self, name, *args, **kwargs):
+        # Make device placement scheduling policy
+        syskwargs = kwargs.pop('syskwargs')
+        if name == 'bop':
+            dst_actor = None
+            for arg in itertools.chain(args, kwargs.values()):
+                if isinstance(arg, self.cp.ndarray):
+                    dst_actor = arg.data.device_id
+                    break
+        else:
+            gid = get_flatten_id(syskwargs['grid_entry'], syskwargs['grid_shape'])
+            dst_actor = gid % self.num_gpus
+
+        #print(f"CupyParallelSystem::call compute {name} on {dst_actor}")
+
+        args = [self._distribute_to(v, dst_actor)
+                if isinstance(v, self.cp.ndarray) else v for v in args]
+        kwargs = {k: self._distribute_to(v, dst_actor)
+                if isinstance(v, self.cp.ndarray) else v for k, v in kwargs.items()}
+
+        with self.cp.cuda.Device(dst_actor):
+            ret = getattr(self.compute_imp, name)(*args, **kwargs)
+
+        ret = self._register_new_array(ret, dst_actor)
+
+        self.dist_dict = {}
+
+        return ret
+
+    def _distribute_to(self, arr, dst_actor):
+        if self.local_cache:
+            arr_hash = (arr.data.device_id, arr.data.mem, arr.data.ptr)
+            ret = self.dist_dict.get((arr_hash, dst_actor), None)
+            if ret is None:
+                if arr.data.device_id == dst_actor:
+                    ret = arr
+                else:
+                    # print(f"Copy {arr.shape} from {arr.data.device_id} to {dst_actor}")
+                    with self.cp.cuda.Device(dst_actor):
+                        ret = self.cp.asarray(arr)
+                self.dist_dict[(arr_hash, dst_actor)] = ret
+            return ret
+        else:
+            if arr.data.device_id == dst_actor:
+                ret = arr
+            else:
+                # print(f"Copy {arr.shape} from {arr.data.device_id} to {dst_actor}")
+                with self.cp.cuda.Device(dst_actor):
+                    ret = self.cp.asarray(arr)
+
+        return ret
+
+    def _register_new_array(self, arr, dst_actor):
+        if self.local_cache:
+            arr_hash = (arr.data.device_id, arr.data.mem, arr.data.ptr)
+            self.dist_dict[(arr_hash, dst_actor)] = arr
+            return arr
+        else:
+            return arr
+
+    def shutdown(self):
+        mempool = self.cp.get_default_memory_pool()
+        mempool.free_all_blocks()
 
 ##############################################################
 ##### RaySystem: Use the scheduler + object store in Ray #####
@@ -154,7 +259,7 @@ class TorchGPURaySystem(RaySystem):
         raise NotImplementedError
 
 ##############################################################
-######### RayActorEngien: Use actors to manage GPUs ##########
+######### RayActorSystem: Use actors to manage GPUs ##########
 ##############################################################
 from typing import Union, List
 from collections import namedtuple
@@ -167,7 +272,7 @@ from ray.actor import ActorHandle
 
 
 ArrayRef = namedtuple("ArrayRef", ["uid", "shape", "dtype"])
-UID_MAX_LEN = 3
+UID_MAX_LEN = 30
 
 
 @ray.remote(num_gpus=1)
@@ -186,7 +291,8 @@ class GPUActor:
         self.torch_init_method = torch_init_method
         self.cupy_nccl_uid = cupy_nccl_uid
         self.arrays = {}
-        self.gc_list = []
+        self.gc_lru_ct = 0
+        self.gc_lru_map = {}
         self.gc_nbytes = 0
 
         if self.arr_lib == "torch":
@@ -319,20 +425,32 @@ class GPUActor:
 
         self.arrays[uid] = data
         self.gc_nbytes += nbytes
-        self.gc_list.append(uid)
+        self.gc_lru_ct += 1
+        self.gc_lru_map[uid] = self.gc_lru_ct
 
         # print("actor %d : register %s (%s)" % (self.world_rank, uid, str(data.shape)))
-
         # print("actor %d : mem size %.1f MB" % (self.world_rank, self.gc_nbytes / 1024/1024))
 
-        if self.gc_nbytes >= 8 * (1 << 30):
-            split = int(len(self.gc_list) * 0.2)
-            to_del = self.gc_list[:split]
-            self.gc_list = self.gc_list[split:]
+        gc_begin_threshold = 100 * (1 << 30)
+        gc_finish_threshold = 8 * (1 << 30)
 
-            for uid in to_del:
+        # print(f"gc bytes: {self.gc_nbytes // 1024 ** 3} GB")
+
+        if self.gc_nbytes >= gc_begin_threshold:
+            uids = list(self.gc_lru_map.keys())
+            uids.sort(key=lambda x: self.gc_lru_map[x])
+            for uid in uids:
+                if self._get_bytes(self.arrays[uid]) < 100:
+                    continue
+                print(f"gc del {uid}, shape: {self.arrays[uid].shape}, lru_ct: {self.gc_lru_map[uid]}")
+
                 self.gc_nbytes -= self._get_bytes(self.arrays[uid])
                 del self.arrays[uid]
+                del self.gc_lru_map[uid]
+
+                if self.gc_nbytes <= gc_finish_threshold:
+                    print("gc break")
+                    break
 
 
 def get_flatten_id(grid_entry, grid_shape):
@@ -458,6 +576,9 @@ class GPUActorSystem(BaseGPUSystem):
             self.comm_pair_lock[lock_key] = ret
         return ret
 
+    def _remove(self, obj_ref: ObjectRef):
+        pass
+
     @ray.remote
     def _copy_task_nccl(
         arr_ref: ArrayRef,
@@ -492,6 +613,7 @@ class GPUActorSystem(BaseGPUSystem):
     def _register_new_array(self, obj_ref: ObjectRef, owner: ActorHandle):
         self.obj_ref_to_owner[obj_ref] = owner
         self.distribution_dict[(obj_ref, owner)] = obj_ref
+
         return obj_ref
 
     def shutdown(self):

@@ -8,7 +8,8 @@ from nums.core.array.application import ArrayApplication
 from nums.core.systems.filesystem import FileSystem
 from nums.core.systems.gpu_systems import (
     NumpySerialSystem, CupySerialSystem, NumpyRaySystem, CupyRaySystem,
-    TorchCPURaySystem, TorchGPURaySystem, CupyOsActorSystem, CupyNcclActorSystem
+    TorchCPURaySystem, TorchGPURaySystem, CupyOsActorSystem, CupyNcclActorSystem,
+    CupyParallelSystem
 )
 from nums.core.application_manager import set_instance
 from nums.models.glms import LogisticRegression
@@ -16,8 +17,14 @@ from nums.models.glms import LogisticRegression
 from utils import benchmark_func, get_number_of_gpus
 
 def benchmark_lr(num_gpus, system_class_list):
-    N = 10000
-    d = 1000
+    if True:
+        N = 1000000
+        d = 1000
+    else:
+        N = 1000
+        d = 50
+    N_block = N // 4
+    d_block = d // 1
 
     for system_class in system_class_list:
         # Init system
@@ -28,11 +35,12 @@ def benchmark_lr(num_gpus, system_class_list):
 
         # Make dataset
         nps.random.seed(0)
-        X = nps.random.randn(N, d)
-        y = nps.zeros(shape=(N,), dtype=bool)
+        X = app_inst.ones((N, d), block_shape=(N_block, d_block))
+        y = app_inst.ones((N,), block_shape=(N_block,))
 
         # Train Logistic Regression Model.
         model = LogisticRegression(solver="newton-cg", tol=1e-8, max_iter=1)
+
         def func():
             tic = time.time()
             model.fit(X, y)
@@ -42,10 +50,11 @@ def benchmark_lr(num_gpus, system_class_list):
 
         costs = benchmark_func(func)
         
-        y_pred = model.predict(X)
-        print("accuracy", (nps.sum(y == y_pred) / X.shape[0]).get())
+        #y_pred = model.predict(X)
+        #print("accuracy", (nps.sum(y == y_pred) / X.shape[0]).get())
+        #del y_pred
 
-        del (X, y, y_pred, model)
+        del (X, y, model)
 
         print(
             "Lib: %s\tCost: %.4f  (CV: %.2f)"
@@ -64,7 +73,8 @@ if __name__ == "__main__":
         # NumpyRaySystem,
         # CupyRaySystem,
         # TorchGPURaySystem,
-        CupyOsActorSystem,
+        # CupyOsActorSystem,
         # CupyNcclActorSystem,
+        CupyParallelSystem,
     ])
 

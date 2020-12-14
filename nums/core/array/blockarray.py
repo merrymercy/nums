@@ -122,7 +122,7 @@ class BlockArray(BlockArrayBase):
         for grid_entry in self.grid.get_entry_iterator():
             block: Block = self.blocks[grid_entry]
             oids.append(self.system.touch(block.oid, syskwargs=block.syskwargs()))
-        self.system.get(oids)
+        #self.system.get(oids)
         return self
 
     def reshape(self, shape=None, **kwargs):
@@ -414,8 +414,6 @@ class BlockArray(BlockArrayBase):
             return self.tensordot(other, 1)
 
     def tensordot(self, other, axes=2):
-        # print("BlockArray::tensordot", self.shape, other.shape, "block shape", self.block_shape)
-
         if not isinstance(other, BlockArray):
             raise ValueError("Cannot automatically construct BlockArray for tensor operations.")
 
@@ -430,13 +428,16 @@ class BlockArray(BlockArrayBase):
 
         other = self.check_or_convert_other(other)
         if basic_vector(self, len(self.shape) - 1) and basic_vector(other, 0):
-            return self._vecdot(other)
+            ret = self._vecdot(other)
         elif len(self.shape) == 2 and (len(other.shape) == 1
                                        or (len(other.shape) == 2 and other.shape[1] == 1)):
             # Optimized matrix vector multiply.
-            return self._matvec(other)
+            ret = self._matvec(other)
         else:
-            return self._tensordot(other, axes)
+            ret = self._tensordot(other, axes)
+
+        #print(f"BlockArray::tensordot result = {ret.shape} (grid_shape={ret.grid.grid_shape})")
+        return ret
 
     def _tensordot(self, other, axes):
         this_axes = self.grid.grid_shape[:-axes]
