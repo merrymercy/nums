@@ -25,3 +25,10 @@
        CupyRaySystem,   5000000,    5.3356,      0.45
        CupyRaySystem,  10000000,   21.3255,      0.47
        CupyRaySystem,  20000000,   -1.0000,      0.00
+ CupyNcclActorSystem,    125000,    0.0412,      0.01
+ CupyNcclActorSystem,    250000,    0.0432,      0.00
+ CupyNcclActorSystem,   1250000,    0.0480,      0.00
+ CupyNcclActorSystem,   2500000,    0.0714,      0.03
+ CupyNcclActorSystem,   5000000,    0.1099,      0.00
+ CupyNcclActorSystem,  10000000,    0.2640,      0.00
+ CupyNcclActorSystem,  20000000,    0.5349,      0.00
