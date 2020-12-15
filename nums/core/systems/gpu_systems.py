@@ -126,7 +126,7 @@ class CupyParallelSystem(BaseGPUSystem):
         self.immediate_gc = immediate_gc
 
         self.compute_imp = cupy_compute.ComputeCls()
-        self.dist_dict = defaultdict(dict)   # Dict[array_id -> Dict[actor_id -> array]]
+        self.dist_dict = defaultdict(dict)   # Dict[hash(array) -> Dict[actor_id -> array]]
         super().__init__()
 
     def put(self, x):
@@ -297,8 +297,29 @@ from ray._raylet import ObjectRef
 from ray.actor import ActorHandle
 
 
-ArrayRef = namedtuple("ArrayRef", ["uid", "shape", "dtype"])
 UID_MAX_LEN = 30
+
+class ArrUID:
+    def __init__(self):
+        self.uid = str(uuid.uuid4())[:UID_MAX_LEN]
+
+    def __hash__(self):
+        return hash(self.uid)
+
+    def __eq__(self, other):
+        return (
+            self.__class__ == other.__class__ and
+            self.uid == other.uid
+        )
+
+
+class ActorSystemArrRef:
+    def __init__(self, arr_uid, system):
+        self.arr_uid = arr_uid
+        self.system = system
+
+    def __del__(self):
+        self.system.delete(self.arr_uid)
 
 
 @ray.remote(num_gpus=1)
@@ -327,7 +348,7 @@ class GPUActor:
 
             self.torch = torch
             self.torch_dist = dist
-            self.cuda_sync = self.cuda_sync_torch
+            self.cuda_sync = self._cuda_sync_torch
             self.compute_imp = None
         elif self.arr_lib == "cupy":
             import cupy as cp
@@ -336,7 +357,7 @@ class GPUActor:
 
             self.cp = cp
             self.cp_nccl = nccl
-            self.cuda_sync = self.cuda_sync_cupy
+            self.cuda_sync = self._cuda_sync_cupy
             self.compute_imp = cupy_compute.ComputeCls()
 
             self.ARR_DTYPE_TO_NCCL_DTYPE = {
@@ -361,43 +382,39 @@ class GPUActor:
             )
         self.cuda_sync()
 
-    def put(self, data) -> ArrayRef:
-        uid = str(uuid.uuid4())[:UID_MAX_LEN]
+    def put(self, arr_uid, data):
         if self.arr_lib == "torch":
             data = self.torch.tensor(data, device="cuda:0")
         elif self.arr_lib == "cupy":
             data = self.cp.array(data)
+        self._register_new_array(arr_uid, data)
 
-        self._register_new_array(uid, data)
-        self.cuda_sync()
-        return ArrayRef(uid, data.shape, data.dtype)
-
-    def get(self, arr_ref: ArrayRef):
+    def get(self, arr_uid):
         if self.arr_lib == "torch":
-            data = self.arrays[arr_ref.uid].cpu().numpy()
+            data = self.arrays[arr_uid].cpu().numpy()
         elif self.arr_lib == "cupy":
-            data = self.arrays[arr_ref.uid].get()
+            data = self.arrays[arr_uid].get()
         return data
 
-    def touch(self, arr_ref: ArrayRef):
+    def touch(self):
         self.cuda_sync()
 
-    def call_compute_interface(self, name, *args, **kwargs):
-        uid = str(uuid.uuid4())[:UID_MAX_LEN]
-
-        args = [self.arrays[v.uid]
-                if isinstance(v, ArrayRef) else v for v in args]
-        kwargs = {k: self.arrays[v.uid]
-                if isinstance(v, ArrayRef) else v for k, v in kwargs.items()}
+    def call_compute_interface(self, output_arr_uid, name, *args, **kwargs):
+        args = [self.arrays[v]
+                if isinstance(v, ArrUID) else v for v in args]
+        kwargs = {k: self.arrays[v]
+                if isinstance(v, ArrUID) else v for k, v in kwargs.items()}
 
         ret = getattr(self.compute_imp, name)(*args, **kwargs)
+        self._register_new_array(output_arr_uid, ret)
 
-        self._register_new_array(uid, ret)
-        self.cuda_sync()
-        return ArrayRef(uid, ret.shape, ret.dtype)
+    def delete(self, arr_uid):
+        del self.arrays[arr_uid]
 
-    def send_nccl(self, arr_ref: ArrayRef, dst_rank):
-        data = self.arrays[arr_ref.uid]
+    def send_nccl(self, arr_uid, dst_rank):
+        raise NotImplementedError
+        data = self.arrays[arr_uid]
+
         if self.arr_lib == "torch":
             self.torch_dist.send(data, dst_rank)
         elif self.arr_lib == "cupy":
@@ -410,7 +427,8 @@ class GPUActor:
             )
         self.cuda_sync()
 
-    def recv_nccl(self, arr_ref: ArrayRef, src_rank):
+    def recv_nccl(self, arr_uid, src_rank):
+        raise NotImplementedError
         if self.arr_lib == "torch":
             data = self.torch.empty(
                 list(arr_ref.shape), dtype=arr_ref.dtype, device="cuda:0"
@@ -428,55 +446,27 @@ class GPUActor:
         self._register_new_array(arr_ref.uid, data)
         self.cuda_sync()
 
-    def send_obj_store(self, arr_ref: ArrayRef):
-        return self.arrays[arr_ref.uid]
+    def send_obj_store(self, arr_uid):
+        return self.arrays[arr_uid].get()
 
-    def recv_obj_store(self, arr_ref: ArrayRef, data):
-        self._register_new_array(arr_ref.uid, data)
+    def recv_obj_store(self, arr_uid, data):
+        if self.arr_lib == "torch":
+            data = self.torch.tensor(data, device="cuda:0")
+        elif self.arr_lib == "cupy":
+            data = self.cp.array(data)
+        self._register_new_array(arr_uid, data)
 
-    def cuda_sync_torch(self):
+    def barrier(self, ctx=None):
+        pass
+
+    def _cuda_sync_torch(self):
         self.torch.cuda.synchronize()
 
-    def cuda_sync_cupy(self):
+    def _cuda_sync_cupy(self):
         self.cp.cuda.Device(0).synchronize()
 
-    def _get_bytes(self, data):
-        if self.arr_lib == "torch":
-            return data.element_size() * data.nelement()
-        elif self.arr_lib == "cupy":
-            return data.nbytes
-
-    def _register_new_array(self, uid, data):
-        nbytes = self._get_bytes(data)
-
-        self.arrays[uid] = data
-        self.gc_nbytes += nbytes
-        self.gc_lru_ct += 1
-        self.gc_lru_map[uid] = self.gc_lru_ct
-
-        # print("actor %d : register %s (%s)" % (self.world_rank, uid, str(data.shape)))
-        # print("actor %d : mem size %.1f MB" % (self.world_rank, self.gc_nbytes / 1024/1024))
-
-        gc_begin_threshold = 100 * (1 << 30)
-        gc_finish_threshold = 8 * (1 << 30)
-
-        # print(f"gc bytes: {self.gc_nbytes // 1024 ** 3} GB")
-
-        if self.gc_nbytes >= gc_begin_threshold:
-            uids = list(self.gc_lru_map.keys())
-            uids.sort(key=lambda x: self.gc_lru_map[x])
-            for uid in uids:
-                if self._get_bytes(self.arrays[uid]) < 100:
-                    continue
-                print(f"gc del {uid}, shape: {self.arrays[uid].shape}, lru_ct: {self.gc_lru_map[uid]}")
-
-                self.gc_nbytes -= self._get_bytes(self.arrays[uid])
-                del self.arrays[uid]
-                del self.gc_lru_map[uid]
-
-                if self.gc_nbytes <= gc_finish_threshold:
-                    print("gc break")
-                    break
+    def _register_new_array(self, arr_uid, data):
+        self.arrays[arr_uid] = data
 
 
 def get_flatten_id(grid_entry, grid_shape):
@@ -514,9 +504,7 @@ class GPUActorSystem(BaseGPUSystem):
 
         # Meta info about actors and communication lock
         self.actor_to_rank = {self.gpu_actors[i]: i for i in range(num_gpus)}
-        self.obj_ref_to_owner = {}  # ObjectRef -> ActorHandle
-        self.distribution_dict = {}  # (ObjectRef, ActorHandle) -> ObjectRef
-        self.comm_pair_lock = {}  # (rank, rank) -> ObjectRef
+        self.dist_dict = defaultdict(dict)   # Dict[arr_uid -> Dict[actor_rank -> arr_uid]]
 
         # Setup communication library
         if comm_lib == "nccl":
@@ -530,51 +518,43 @@ class GPUActorSystem(BaseGPUSystem):
         # Init ComputeInterface
         super().__init__()
 
-    def put(self, data) -> ObjectRef:
-        #self.actor_ct = (self.actor_ct + 1) % len(self.gpu_actors)
-        #dst_actor = self.gpu_actors[self.actor_ct]
-        #obj_ref = dst_actor.put.remote(data)
-        #return self._register_new_array(obj_ref, dst_actor)
+    def put(self, data):
+        arr_uid = ArrUID()
 
         actor0 = self.gpu_actors[0]
-        obj_ref = actor0.put.remote(data)
-        self._register_new_array(obj_ref, actor0)
+        actor0.put.remote(arr_uid, data)
+        self._register_new_array(arr_uid, actor0)
 
-        dist_tasks = []
         for i in range(1, len(self.gpu_actors)):
-            ref = self._distribute_to(obj_ref, self.gpu_actors[i])
-            dist_tasks.append(ref)
-        ray.get(dist_tasks)
+            self._distribute_to(arr_uid, self.gpu_actors[i])
 
-        return obj_ref
+        return ActorSystemArrRef(arr_uid, self)
 
-    def get(self, obj_ref: Union[ObjectRef, List[ObjectRef]]):
-        if isinstance(obj_ref, ObjectRef):
-            actor = self.obj_ref_to_owner[obj_ref]
-            obj_ref = actor.get.remote(obj_ref)
-            return ray.get(obj_ref)
+    def _get_owner(self, arr_uid):
+        for actor_rank in self.dist_dict[arr_uid]:
+            return self.gpu_actors[actor_rank]
+
+    def get(self, arr_refs):
+        if isinstance(arr_refs, ActorSystemArrRef):
+            return ray.get(self._get_owner(arr_refs.arr_uid).get.remote(arr_refs.arr_uid))
         else:
-            obj_refs = obj_ref
-            actors = [self.obj_ref_to_owner[obj_ref] for obj_ref in obj_refs]
-            obj_refs = [
-                actor.get.remote(obj_ref) for actor, obj_ref in zip(actors, obj_refs)
-            ]
-            return ray.get(obj_refs)
+            return ray.get([self._get_owner(arr_ref.arr_uid).get.remote(arr_ref.arr_uid)
+                for arr_ref in arr_refs])
 
-    def touch(self, obj_ref, syskwargs):
-        actor = self.obj_ref_to_owner[obj_ref]
-        ray.wait([actor.touch.remote(obj_ref)])
-        return obj_ref
+    def touch(self, arr_ref, syskwargs):
+        ray.get([self._get_owner(arr_ref.arr_uid).touch.remote()])
+        return arr_ref
 
-    def call_compute_interface(self, name, *args, **kwargs) -> ObjectRef:
+    def call_compute_interface(self, name, *args, **kwargs):
         # Make device placement decisions
         syskwargs = kwargs.pop('syskwargs')
         if name == 'bop':
             dst_actor = None
             for arg in itertools.chain(args, kwargs.values()):
-                if isinstance(arg, ObjectRef):
-                    dst_actor = self.obj_ref_to_owner[arg]
+                if isinstance(arg, ActorSystemArrRef):
+                    dst_actor = self._get_owner(arg.arr_uid)
                     break
+            assert dst_actor is not None
         else:
             gid = get_flatten_id(syskwargs['grid_entry'], syskwargs['grid_shape'])
             actor_id = gid % len(self.gpu_actors)
@@ -582,48 +562,59 @@ class GPUActorSystem(BaseGPUSystem):
 
         print(f"CupyActorSystem::call compute {name} on {self.gpu_actors.index(dst_actor)}")
 
-        args = [self._distribute_to(v, dst_actor)
-                if isinstance(v, ObjectRef) else v for v in args]
-        kwargs = {k: self._distribute_to(v, dst_actor)
-                if isinstance(v, ObjectRef) else v for k, v in kwargs.items()}
+        args = [self._distribute_to(v.arr_uid, dst_actor)
+                if isinstance(v, ActorSystemArrRef) else v for v in args]
+        kwargs = {k: self._distribute_to(v.arr_uid, dst_actor)
+                if isinstance(v, ActorSystemArrRef) else v for k, v in kwargs.items()}
 
-        obj_ref = dst_actor.call_compute_interface.remote(name, *args, **kwargs)
+        arr_uid = ArrUID()
+        dst_actor.call_compute_interface.remote(arr_uid, name, *args, **kwargs)
 
-        return self._register_new_array(obj_ref, dst_actor)
+        self._register_new_array(arr_uid, dst_actor)
+        return ActorSystemArrRef(arr_uid, self)
 
-    def _distribute_to(self, obj_ref: ObjectRef, dst: ActorHandle) -> ObjectRef:
-        ret = self.distribution_dict.get((obj_ref, dst), None)
+    def _distribute_to(self, arr_uid, dst_actor: ActorHandle):
+        dst_rank = self.actor_to_rank[dst_actor]
+        ret = self.dist_dict[arr_uid].get(dst_rank, None)
         if ret is None:
-            src = self.obj_ref_to_owner[obj_ref]
+            src_actor = self._get_owner(arr_uid)
             src_rank = self.actor_to_rank[src]
-            dst_rank = self.actor_to_rank[dst]
             assert src_rank != dst_rank
-            lock_key = (min(src_rank, dst_rank), max(src_rank, dst_rank))
 
-            ret = self.copy_task.remote(
-                obj_ref,
-                src,
+            barrier = self.copy_task.remote(
+                arr_uid,
+                src_actor,
                 src_rank,
-                dst,
+                dst_actor,
                 dst_rank,
-                self.comm_pair_lock.get(lock_key, None),
+                src_actor.barrier(),
+                dsr_actor.barrier()
             )
-            self.distribution_dict[(obj_ref, dst)] = ret
-            self.comm_pair_lock[lock_key] = ret
+            src_actor.barrier(barrier)
+            dst_actor.barrier(barrier)
+
+            ret = arr_uid
+            self.dist_dict[arr_uid][dst_actor] = ret
         return ret
 
-    def _remove(self, obj_ref: ObjectRef):
-        pass
+    def _register_new_array(self, arr_uid, dst_actor: ActorHandle):
+        self.dist_dict[arr_uid][self.actor_to_rank[dst_actor]] = arr_uid
+        return arr_uid
+
+    def delete(self, arr_uid):
+        for actor_rank in self.dist_dict[arr_uid]:
+            self.gpu_actors[actor_rank].delete.remote(arr_uid)
 
     @ray.remote
     def _copy_task_nccl(
-        arr_ref: ArrayRef,
+        arr_uid,
         src_actor: ActorHandle,
         src_rank,
         dst_actor: ActorHandle,
         dst_rank,
         lock,
-    ) -> ArrayRef:
+    ):
+        raise NotImplementedError
         a = src_actor.send_nccl.remote(arr_ref, dst_rank)
         b = dst_actor.recv_nccl.remote(arr_ref, src_rank)
         ray.get([a, b])
@@ -631,35 +622,27 @@ class GPUActorSystem(BaseGPUSystem):
 
     @ray.remote
     def _copy_task_obj_store(
-        arr_ref: ArrayRef,
+        arr_uid,
         src_actor: ActorHandle,
         src_rank,
         dst_actor: ActorHandle,
         dst_rank,
-        lock,
-    ) -> ArrayRef:
+        barrier,
+    ):
         # print("GPUSystem send %s from %d to %d" % (arr_ref.uid, src_rank, dst_rank), flush=True)
         ray.get(
             dst_actor.recv_obj_store.remote(
-                arr_ref, src_actor.send_obj_store.remote(arr_ref)
+                arr_uid, src_actor.send_obj_store.remote(arr_uid)
             )
         )
-        return arr_ref
-
-    def _register_new_array(self, obj_ref: ObjectRef, owner: ActorHandle):
-        self.obj_ref_to_owner[obj_ref] = owner
-        self.distribution_dict[(obj_ref, owner)] = obj_ref
-
-        return obj_ref
+        return arr_uid
 
     def shutdown(self):
         for actor in self.gpu_actors:
             ray.kill(actor)
         del self.gpu_actors
         del self.actor_to_rank
-        del self.obj_ref_to_owner
-        del self.distribution_dict
-        del self.comm_pair_lock
+        del self.dist_dict
 
 
 class CupyNcclActorSystem(GPUActorSystem):

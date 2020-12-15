@@ -28,8 +28,8 @@ def test_gc(num_gpus):
         d_block = d // 1
     dtype = np.float32
 
-    #system = CupyOsActorSystem(num_gpus)
-    system = CupyParallelSystem(num_gpus, immediate_gc=False)
+    system = CupyOsActorSystem(num_gpus)
+    #system = CupyParallelSystem(num_gpus, immediate_gc=False)
     system.init()
     app_inst = ArrayApplication(system=system, filesystem=FileSystem(system))
 
