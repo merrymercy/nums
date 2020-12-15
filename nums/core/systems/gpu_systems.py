@@ -602,8 +602,9 @@ class GPUActorSystem(BaseGPUSystem):
         return arr_uid
 
     def delete(self, arr_uid):
-        for actor_rank in self.dist_dict[arr_uid]:
-            self.gpu_actors[actor_rank].delete.remote(arr_uid)
+        if self.dist_dict:
+            for actor_rank in self.dist_dict[arr_uid]:
+                self.gpu_actors[actor_rank].delete.remote(arr_uid)
 
     @ray.remote
     def _copy_task_nccl(
@@ -639,10 +640,11 @@ class GPUActorSystem(BaseGPUSystem):
 
     def shutdown(self):
         for actor in self.gpu_actors:
+            ray.get(actor.barrier.remote())
             ray.kill(actor)
         del self.gpu_actors
         del self.actor_to_rank
-        del self.dist_dict
+        self.dist_dict = None
 
 
 class CupyNcclActorSystem(GPUActorSystem):
