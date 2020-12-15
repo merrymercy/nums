@@ -1,5 +1,5 @@
-import time
 import argparse
+import time
 import gc
 
 import numpy as np

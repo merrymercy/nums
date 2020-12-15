@@ -1,3 +1,4 @@
+import argparse
 import time
 
 import numpy as np
@@ -150,8 +151,16 @@ def benchmark_lr(num_gpus, N_list, system_class_list, d=1000, dtype=np.float32):
 
 
 if __name__ == "__main__":
-    num_gpus = get_number_of_gpus()
-    ray.init(num_gpus=num_gpus)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--num-gpus", type=int)
+
+    args = parser.parse_args()
+    num_gpus = args.num_gpus or get_number_of_gpus()
+
+    try:
+        ray.init(address="auto")
+    except ConnectionError:
+        ray.init()
 
     benchmark_lr(
         num_gpus,
@@ -164,6 +173,7 @@ if __name__ == "__main__":
             10e6 / 4,
             20e6 / 4,
             40e6 / 4,
+            80e6 / 4,
         ],
         system_class_list=[
             # NumpySerialSystem,
