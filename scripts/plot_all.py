@@ -57,14 +57,14 @@ def draw_grouped_bar_chart(data, baseline=None, output='out.png',
             baseline_cost = data[wkl][baseline]
         else:
             # normalize to best library
-            baseline_cost = 1e10
-            for method in methods:
-                if data[wkl][method] < baseline_cost:
-                    baseline_cost = data[wkl][method]
+            baseline_cost = 1
+            #for method in methods:
+            #    if data[wkl][method] < baseline_cost:
+            #        baseline_cost = data[wkl][method]
 
         methods.sort(key=lambda x: method2order(x))
         for method in methods:
-            relative_speedup = baseline_cost / data[wkl][method]
+            relative_speedup = data[wkl][method] / baseline_cost
             if yticks is None:
                 ys.append(relative_speedup)
             else:
@@ -96,7 +96,7 @@ def draw_grouped_bar_chart(data, baseline=None, output='out.png',
         plt.tick_params(axis='x', which='both', bottom='off', top='off')
 
         if draw_ylabel is True:
-            ax.set_ylabel('Relative Speedup', fontsize=fontsize)
+            ax.set_ylabel('Time Cost (s)', fontsize=fontsize)
         elif isinstance(draw_ylabel, str):
             ax.set_ylabel(draw_ylabel, fontsize=fontsize)
 
@@ -117,6 +117,9 @@ def draw_grouped_bar_chart(data, baseline=None, output='out.png',
     # put legend outside the plot
     all_methods = list(all_methods)
     all_methods.sort(key=lambda x : method2order(x))
+
+    ax.set_xlabel("Dataset Size", fontsize=fontsize)
+    ax.set_title(title, fontsize=fontsize, pad=60.0)
 
     if draw_legend:
         legend_nrow = legend_nrow or 2
@@ -147,6 +150,9 @@ def read_data(in_file):
 
         workload_name = "%.1f GB" % (N * 1000 * 4 / 1e9)
 
+        if cost < 0:
+            continue
+
         if workload_name not in data:
             data[workload_name] = {}
 
@@ -156,8 +162,6 @@ def read_data(in_file):
 
 
 if __name__ == "__main__":
-    in_file = "results.csv"
-
-    data = read_data(in_file)
-    draw_grouped_bar_chart(data, legend_nrow=1, title="X.T @ X")
+    data = read_data("result_bop.csv")
+    draw_grouped_bar_chart(data, legend_nrow=1, title="Time cost for $X^TX$", yscale_log=True)
 

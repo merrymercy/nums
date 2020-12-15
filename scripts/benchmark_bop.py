@@ -105,52 +105,55 @@ def benchmark_x_T_x(num_gpus, N_list, system_class_list, d=1000):
         N_block = N // num_gpus
         d_block = d
         for system_class in system_class_list:
-            if system_class in ["Cupy", "Numpy"]:
-                name = system_class
-                import cupy as cp
+            try:
+                if system_class in ["Cupy", "Numpy"]:
+                    name = system_class
+                    import cupy as cp
 
-                arr_lib = cp if system_class == "Cupy" else np
+                    arr_lib = cp if system_class == "Cupy" else np
 
-                x = arr_lib.ones((N, d), dtype=dtype)
-                cp.cuda.Device(0).synchronize()
-
-                def func():
-                    tic = time.time()
-                    c = x.T @ x
+                    x = arr_lib.ones((N, d), dtype=dtype)
                     cp.cuda.Device(0).synchronize()
-                    toc = time.time()
 
-                    del c
-                    return toc - tic, None
+                    def func():
+                        tic = time.time()
+                        c = x.T @ x
+                        cp.cuda.Device(0).synchronize()
+                        toc = time.time()
 
-                costs = benchmark_func(func)
+                        del c
+                        return toc - tic, None
 
-                del x
-            else:
-                name = system_class.__name__
-                system = system_class(num_gpus)
-                system.init()
-                app_inst = ArrayApplication(
-                    system=system, filesystem=FileSystem(system)
-                )
+                    costs = benchmark_func(func)
 
-                x = app_inst.ones(
-                    (N, d), block_shape=(N_block, d_block), dtype=dtype
-                )
-                x.touch()
+                    del x
+                else:
+                    name = system_class.__name__
+                    system = system_class(num_gpus)
+                    system.init()
+                    app_inst = ArrayApplication(
+                        system=system, filesystem=FileSystem(system)
+                    )
 
-                def func():
-                    tic = time.time()
-                    c = x.T @ x
-                    c.touch()
-                    toc = time.time()
-                    del c
-                    return toc - tic, None
+                    x = app_inst.ones(
+                        (N, d), block_shape=(N_block, d_block), dtype=dtype
+                    )
+                    x.touch()
 
-                costs = benchmark_func(func)
+                    def func():
+                        tic = time.time()
+                        c = x.T @ x
+                        c.touch()
+                        toc = time.time()
+                        del c
+                        return toc - tic, None
 
-                del (x, app_inst)
-                system.shutdown()
+                    costs = benchmark_func(func)
+
+                    del (x, app_inst)
+                    system.shutdown()
+            except Exception:
+                costs = [-1]
 
             log_str = format_string % (
                 name,
@@ -161,7 +164,7 @@ def benchmark_x_T_x(num_gpus, N_list, system_class_list, d=1000):
 
             print(log_str)
 
-            with open("results.csv", "a") as f:
+            with open("result_bop.csv", "a") as f:
                 f.write(log_str + "\n")
 
 
@@ -172,9 +175,13 @@ if __name__ == "__main__":
     benchmark_x_T_x(
         num_gpus,
         N_list=[
-            1e4,
-            1e5,
-            1e6,
+            0.5e6 / 4,
+            1e6 / 4,
+            5e6 / 4,
+            10e6 / 4,
+            20e6 / 4,
+            40e6 / 4,
+            80e6 / 4,
         ],
         system_class_list=[
             # NumpySerialSystem,
