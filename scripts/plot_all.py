@@ -5,6 +5,7 @@ method_order_list = [
     "Numpy",
     "Cupy",
     "CupySerialSystem",
+    "CupyRaySystem",
     "CupyParallelSystem",
 ]
 
@@ -17,8 +18,14 @@ def method2color(method):
     return "C%d" % method_order_list.index(method)
 
 
+show_name_table = {
+    "CupyRaySystem": "Cupy + ObjectStore",
+    "CupyParallelSystem": "Cupy + Actor",
+}
+
+
 def show_name(method):
-    return method
+    return show_name_table.get(method, method)
 
 
 def draw_grouped_bar_chart(

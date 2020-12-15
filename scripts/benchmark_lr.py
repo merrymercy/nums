@@ -21,28 +21,36 @@ from nums.models.glms import LogisticRegression
 
 from utils import benchmark_func, get_number_of_gpus
 
+
 def cupy_used_bytes():
     import cupy as cp
+
     mempool = cp.get_default_memory_pool()
     return mempool.used_bytes()
 
+
 global app
+
 
 def forward(X, theta, one):
     Z = X @ theta
     mu = one / (one + app.exp(-Z))
     return mu
 
+
 def grad(X, y, mu):
     return X.T @ (mu - y)
+
 
 def hessian(X, one, mu):
     s = mu * (one - mu)
     t = X.T * s
     return t @ X
 
+
 def update_theta(g, hess, local_theta):
     return local_theta - app.inv(hess) @ g
+
 
 def one_step_fit(app, X, y):
     theta = app.zeros((X.shape[1],), (X.block_shape[1],), dtype=X.dtype)
@@ -52,6 +60,7 @@ def one_step_fit(app, X, y):
     hess_ = hessian(X, one, mu)
     theta = update_theta(grad_, hess_, theta)
     theta.touch()
+
 
 def one_step_fit_np(np, X, y):
     theta = np.zeros((X.shape[1],), dtype=X.dtype)
@@ -87,7 +96,7 @@ def benchmark_lr(num_gpus, N_list, system_class_list, d=1000, dtype=np.float32):
 
                     # Prevent the Singular matrix Error in np.linalg.inv
                     arange = arr_lib.arange(N)
-                    X[arange,arange % d] = 1
+                    X[arange, arange % d] = 1
                     cp.cuda.Device(0).synchronize()
 
                     # Benchmark one step LR
@@ -98,8 +107,8 @@ def benchmark_lr(num_gpus, N_list, system_class_list, d=1000, dtype=np.float32):
                         toc = time.time()
                         return toc - tic, None
 
-                    #func()
-                    #exit()
+                    # func()
+                    # exit()
 
                     costs = benchmark_func(func)
                     del (X, y)
@@ -166,7 +175,6 @@ if __name__ == "__main__":
             # CupyNcclActorSystem,
             CupyParallelSystem,
             "Cupy",
-            "Numpy",
+            # "Numpy",
         ],
     )
-

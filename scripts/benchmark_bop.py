@@ -179,7 +179,7 @@ if __name__ == "__main__":
             # NumpySerialSystem,
             # CupySerialSystem,
             # NumpyRaySystem,
-            # CupyRaySystem,
+            CupyRaySystem,
             # TorchGPURaySystem,
             # CupyOsActorSystem,
             # CupyNcclActorSystem,
