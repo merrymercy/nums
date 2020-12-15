@@ -18,6 +18,7 @@
                Numpy,  10000000,   19.6660,      0.00
   CupyParallelSystem,  20000000,   -1.0000,     -0.00
                 Cupy,  20000000,   -1.0000,     -0.00
+               Numpy,  20000000,   39.2918,      0.00
        CupyRaySystem,    125000,    0.1010,      0.02
        CupyRaySystem,    250000,    0.1710,      0.03
        CupyRaySystem,   1250000,    0.7390,      0.01
