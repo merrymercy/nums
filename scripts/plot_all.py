@@ -206,7 +206,7 @@ if __name__ == "__main__":
         data, legend_nrow=1, title="Compute $X^TX$",
         yscale_log=True,
         output="bop.png",
-        yticks=[0.0625, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0],
+        yticks=[0.0625, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0],
     )
 
     #data = read_data("result_lr.csv")
