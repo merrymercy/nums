@@ -568,7 +568,7 @@ class GPUActorSystem(BaseGPUSystem):
             actor_id = gid % len(self.gpu_actors)
             dst_actor = self.gpu_actors[actor_id]
 
-        #print(f"CupyActorSystem::call compute {name} on {self.gpu_actors.index(dst_actor)}")
+        #print(f"GPUActorSystem::call compute {name} on {self.gpu_actors.index(dst_actor)}")
 
         args = [self._distribute_to(v.arr_uid, dst_actor)
                 if isinstance(v, ActorSystemArrRef) else v for v in args]
