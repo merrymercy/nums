@@ -167,7 +167,8 @@ class CupyParallelSystem(BaseGPUSystem):
             self.dist_dict = defaultdict(dict)
         else:
             ret = self._register_new_array(ret, dst_actor)
-            self._gc()
+            if len(self.dist_dict) > 100:
+                self._gc()
 
         return ret
 
@@ -204,15 +205,14 @@ class CupyParallelSystem(BaseGPUSystem):
 
     def _gc(self):
         to_delete = []
-        live_ct = 0
         for arr_hash, actor_dict in self.dist_dict.items():
             if all(len(gc.get_referrers(k)) <= 2 for k in actor_dict.values()):
                 to_delete.append(arr_hash)
-            live_ct += 1
         for arr_hash in to_delete:
             del self.dist_dict[arr_hash]
 
     def shutdown(self):
+        self.dist_dict = None
         mempool = self.cp.get_default_memory_pool()
         mempool.free_all_blocks()
 
