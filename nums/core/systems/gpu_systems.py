@@ -12,6 +12,11 @@ from nums.core.settings import np_ufunc_map
 from nums.core.systems.interfaces import RNGInterface
 from nums.core.systems.utils import extract_functions
 
+def cupy_used_bytes():
+    import cupy as cp
+    mempool = cp.get_default_memory_pool()
+    return mempool.used_bytes()
+
 class BaseGPUSystem(object):
     def __init__(self):
         for name in ['random_block', 'new_block', 'update_block', 'create_block',
@@ -52,7 +57,9 @@ class SerialSystem(BaseGPUSystem):
         #    print(f"SerialSystem::call compute {name} {args[0]}")
         #else:
         #    print(f"SerialSystem::call compute {name}")
-        return getattr(self.compute_imp, name)(*args, **kwargs)
+        ret =  getattr(self.compute_imp, name)(*args, **kwargs)
+        #print(f"SerialSystem::result {ret.shape} {cupy_used_bytes()/1e9} {ret.dtype}")
+        return ret
 
 
 class NumpySerialSystem(SerialSystem):

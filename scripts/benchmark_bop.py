@@ -46,10 +46,10 @@ def benchmark_tensordot(num_gpus, system_class_list):
         if system_class:
             system = system_class(num_gpus)
             system.init()
-            app_inst = ArrayApplication(system=system, filesystem=FileSystem(system))
+            app = ArrayApplication(system=system, filesystem=FileSystem(system))
 
-            block_a = app_inst.array(a_np, block_shape=(d_block, N_block))
-            block_b = app_inst.array(b_np, block_shape=(N_block, d_block))
+            block_a = app.array(a_np, block_shape=(d_block, N_block))
+            block_b = app.array(b_np, block_shape=(N_block, d_block))
 
             def func():
                 tic = time.time()
@@ -61,7 +61,7 @@ def benchmark_tensordot(num_gpus, system_class_list):
 
             costs = benchmark_func(func)
 
-            del (block_a, block_b, app_inst)
+            del (block_a, block_b, app)
             system.shutdown()
         else:
             import cupy as cp
@@ -93,9 +93,7 @@ def benchmark_tensordot(num_gpus, system_class_list):
         )
 
 
-def benchmark_x_T_x(num_gpus, N_list, system_class_list, d=1000):
-    dtype = np.float32
-
+def benchmark_x_T_x(num_gpus, N_list, system_class_list, d=1000, dtype=np.float32):
     format_string = "%20s,%10s,%10s,%10s"
     print(format_string % ("Library", "N", "Cost", "CV"))
 
@@ -131,13 +129,9 @@ def benchmark_x_T_x(num_gpus, N_list, system_class_list, d=1000):
                     name = system_class.__name__
                     system = system_class(num_gpus)
                     system.init()
-                    app_inst = ArrayApplication(
-                        system=system, filesystem=FileSystem(system)
-                    )
+                    app = ArrayApplication(system=system, filesystem=FileSystem(system))
 
-                    x = app_inst.ones(
-                        (N, d), block_shape=(N_block, d_block), dtype=dtype
-                    )
+                    x = app.ones((N, d), block_shape=(N_block, d_block), dtype=dtype)
                     x.touch()
 
                     def func():
@@ -150,8 +144,8 @@ def benchmark_x_T_x(num_gpus, N_list, system_class_list, d=1000):
 
                     costs = benchmark_func(func)
 
-                    del (x, app_inst)
                     system.shutdown()
+                    del (x, app)
             except Exception:
                 costs = [-1]
 
@@ -161,9 +155,7 @@ def benchmark_x_T_x(num_gpus, N_list, system_class_list, d=1000):
                 "%.4f" % np.mean(costs),
                 "%.2f" % (np.std(costs) / np.mean(costs)),
             )
-
             print(log_str)
-
             with open("result_bop.csv", "a") as f:
                 f.write(log_str + "\n")
 
@@ -196,4 +188,3 @@ if __name__ == "__main__":
             "Numpy",
         ],
     )
-

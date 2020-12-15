@@ -48,7 +48,7 @@ class BlockArray(BlockArrayBase):
         if isinstance(val, int):
             dtype = np.int
         elif isinstance(val, float):
-            dtype = np.float
+            dtype = np.float32
         else:
             assert isinstance(val, (np.int32, np.int64, np.float32, np.float64))
             dtype = None
@@ -686,7 +686,7 @@ class BlockArray(BlockArrayBase):
         return other ** self
 
     def __neg__(self):
-        return -1 * self
+        return -1.0 * self
 
     def __pos__(self):
         return self
