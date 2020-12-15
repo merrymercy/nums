@@ -300,8 +300,12 @@ from ray.actor import ActorHandle
 UID_MAX_LEN = 30
 
 class ArrUID:
+    ct = 0
+
     def __init__(self):
-        self.uid = str(uuid.uuid4())[:UID_MAX_LEN]
+        self.uid = ArrUID.ct
+
+        ArrUID.ct += 1
 
     def __hash__(self):
         return hash(self.uid)
@@ -311,6 +315,9 @@ class ArrUID:
             self.__class__ == other.__class__ and
             self.uid == other.uid
         )
+
+    def __str__(self):
+        return str(self.uid)
 
 
 class ActorSystemArrRef:
@@ -412,7 +419,6 @@ class GPUActor:
         del self.arrays[arr_uid]
 
     def send_nccl(self, arr_uid, dst_rank):
-        raise NotImplementedError
         data = self.arrays[arr_uid]
 
         if self.arr_lib == "torch":
@@ -425,17 +431,15 @@ class GPUActor:
                 dst_rank,
                 self.cp.cuda.Stream.null.ptr,
             )
-        self.cuda_sync()
+        #self.cuda_sync()
 
-    def recv_nccl(self, arr_uid, src_rank):
-        raise NotImplementedError
+    def recv_nccl(self, arr_uid, shape_info, src_rank):
+        shape, dtype = shape_info
         if self.arr_lib == "torch":
-            data = self.torch.empty(
-                list(arr_ref.shape), dtype=arr_ref.dtype, device="cuda:0"
-            )
+            data = self.torch.empty(shape, dtype=dtype, device="cuda:0")
             self.torch_dist.recv(data, src_rank)
         elif self.arr_lib == "cupy":
-            data = self.cp.empty(arr_ref.shape, arr_ref.dtype)
+            data = self.cp.empty(shape, dtype)
             self.comm.recv(
                 data.data.ptr,
                 data.size,
@@ -443,8 +447,8 @@ class GPUActor:
                 src_rank,
                 self.cp.cuda.Stream.null.ptr,
             )
-        self._register_new_array(arr_ref.uid, data)
-        self.cuda_sync()
+        self._register_new_array(arr_uid, data)
+        #self.cuda_sync()
 
     def send_obj_store(self, arr_uid):
         return self.arrays[arr_uid].get()
@@ -455,6 +459,10 @@ class GPUActor:
         elif self.arr_lib == "cupy":
             data = self.cp.array(data)
         self._register_new_array(arr_uid, data)
+
+    def get_shape_info(self, arr_uid):
+        arr = self.arrays[arr_uid]
+        return list(arr.shape), arr.dtype
 
     def barrier(self, ctx=None):
         pass
@@ -504,7 +512,7 @@ class GPUActorSystem(BaseGPUSystem):
 
         # Meta info about actors and communication lock
         self.actor_to_rank = {self.gpu_actors[i]: i for i in range(num_gpus)}
-        self.dist_dict = defaultdict(dict)   # Dict[arr_uid -> Dict[actor_rank -> arr_uid]]
+        self.dist_dict = defaultdict(dict)   # Dict[arr_uid -> Dict[actor -> arr_uid]]
 
         # Setup communication library
         if comm_lib == "nccl":
@@ -531,8 +539,8 @@ class GPUActorSystem(BaseGPUSystem):
         return ActorSystemArrRef(arr_uid, self)
 
     def _get_owner(self, arr_uid):
-        for actor_rank in self.dist_dict[arr_uid]:
-            return self.gpu_actors[actor_rank]
+        for actor in self.dist_dict[arr_uid]:
+            return actor
 
     def get(self, arr_refs):
         if isinstance(arr_refs, ActorSystemArrRef):
@@ -560,7 +568,7 @@ class GPUActorSystem(BaseGPUSystem):
             actor_id = gid % len(self.gpu_actors)
             dst_actor = self.gpu_actors[actor_id]
 
-        print(f"CupyActorSystem::call compute {name} on {self.gpu_actors.index(dst_actor)}")
+        #print(f"CupyActorSystem::call compute {name} on {self.gpu_actors.index(dst_actor)}")
 
         args = [self._distribute_to(v.arr_uid, dst_actor)
                 if isinstance(v, ActorSystemArrRef) else v for v in args]
@@ -574,11 +582,11 @@ class GPUActorSystem(BaseGPUSystem):
         return ActorSystemArrRef(arr_uid, self)
 
     def _distribute_to(self, arr_uid, dst_actor: ActorHandle):
-        dst_rank = self.actor_to_rank[dst_actor]
-        ret = self.dist_dict[arr_uid].get(dst_rank, None)
+        ret = self.dist_dict[arr_uid].get(dst_actor, None)
         if ret is None:
             src_actor = self._get_owner(arr_uid)
-            src_rank = self.actor_to_rank[src]
+            src_rank = self.actor_to_rank[src_actor]
+            dst_rank = self.actor_to_rank[dst_actor]
             assert src_rank != dst_rank
 
             barrier = self.copy_task.remote(
@@ -587,24 +595,24 @@ class GPUActorSystem(BaseGPUSystem):
                 src_rank,
                 dst_actor,
                 dst_rank,
-                src_actor.barrier(),
-                dsr_actor.barrier()
+                src_actor.barrier.remote(),
+                dst_actor.barrier.remote()
             )
-            src_actor.barrier(barrier)
-            dst_actor.barrier(barrier)
+            src_actor.barrier.remote(barrier)
+            dst_actor.barrier.remote(barrier)
 
             ret = arr_uid
             self.dist_dict[arr_uid][dst_actor] = ret
         return ret
 
     def _register_new_array(self, arr_uid, dst_actor: ActorHandle):
-        self.dist_dict[arr_uid][self.actor_to_rank[dst_actor]] = arr_uid
+        self.dist_dict[arr_uid][dst_actor] = arr_uid
         return arr_uid
 
     def delete(self, arr_uid):
         if self.dist_dict:
-            for actor_rank in self.dist_dict[arr_uid]:
-                self.gpu_actors[actor_rank].delete.remote(arr_uid)
+            for actor in self.dist_dict[arr_uid]:
+                actor.delete.remote(arr_uid)
 
     @ray.remote
     def _copy_task_nccl(
@@ -613,13 +621,13 @@ class GPUActorSystem(BaseGPUSystem):
         src_rank,
         dst_actor: ActorHandle,
         dst_rank,
-        lock,
+        src_barrier,
+        dst_barrier,
     ):
-        raise NotImplementedError
-        a = src_actor.send_nccl.remote(arr_ref, dst_rank)
-        b = dst_actor.recv_nccl.remote(arr_ref, src_rank)
+        shape_info = src_actor.get_shape_info.remote(arr_uid)
+        a = src_actor.send_nccl.remote(arr_uid, dst_rank)
+        b = dst_actor.recv_nccl.remote(arr_uid, shape_info, src_rank)
         ray.get([a, b])
-        return arr_ref
 
     @ray.remote
     def _copy_task_obj_store(
@@ -628,15 +636,14 @@ class GPUActorSystem(BaseGPUSystem):
         src_rank,
         dst_actor: ActorHandle,
         dst_rank,
-        barrier,
+        src_barrier,
+        dst_barrier,
     ):
         # print("GPUSystem send %s from %d to %d" % (arr_ref.uid, src_rank, dst_rank), flush=True)
-        ray.get(
-            dst_actor.recv_obj_store.remote(
-                arr_uid, src_actor.send_obj_store.remote(arr_uid)
-            )
+        t = dst_actor.recv_obj_store.remote(
+            arr_uid, src_actor.send_obj_store.remote(arr_uid)
         )
-        return arr_uid
+        ray.get(t)
 
     def shutdown(self):
         for actor in self.gpu_actors:
