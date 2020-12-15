@@ -18,9 +18,8 @@ from nums.core.systems.gpu_systems import (
 from utils import benchmark_func, get_number_of_gpus
 
 def test_gc(num_gpus):
-    # Compute answer with numpy
     if True:
-        N, d = 20000, 20000
+        N, d = 20000, 10000
         N_block = N // 1
         d_block = d // 1
     else:
@@ -29,17 +28,13 @@ def test_gc(num_gpus):
         d_block = d // 1
     dtype = np.float32
 
-    a_np = np.zeros((d, N)).astype(dtype)
-    b_np = np.zeros((N, d)).astype(dtype)
-    print("np array generated")
-
     #system = CupyOsActorSystem(num_gpus)
-    system = CupyParallelSystem(num_gpus, local_cache=False)
+    system = CupyParallelSystem(num_gpus, immediate_gc=False)
     system.init()
     app_inst = ArrayApplication(system=system, filesystem=FileSystem(system))
 
-    block_a = app_inst.array(a_np, block_shape=(d_block, N_block))
-    block_b = app_inst.array(b_np, block_shape=(N_block, d_block))
+    block_a = app_inst.ones((N, d), block_shape=(N_block, d_block))
+    block_b = app_inst.ones((N, d), block_shape=(N_block, d_block))
 
     for i in range(10000):
         print(i)

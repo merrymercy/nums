@@ -24,6 +24,14 @@ def get_number_of_gpus():
     return int(val)
 
 
+def cupy_used_bytes():
+    import cupy as cp
+
+    mempool = cp.get_default_memory_pool()
+    return mempool.used_bytes()
+
+
 if __name__ == "__main__":
     print(f"Number of GPUS: {get_number_of_gpus()}")
+
 

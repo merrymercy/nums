@@ -3,6 +3,7 @@ import functools
 import time
 import itertools
 import gc
+from collections import defaultdict
 
 import numpy as np
 import ray
@@ -106,16 +107,17 @@ class CupySerialSystem(SerialSystem):
 ########## ParallelSystem: Parallel implementation ###########
 ##############################################################
 class CupyParallelSystem(BaseGPUSystem):
-    def __init__(self, num_gpus, local_cache=True):
+    def __init__(self, num_gpus, local_cache=True, immediate_gc=True):
         import cupy as cp
         from nums.core.systems import cupy_compute
 
         self.cp = cp
         self.num_gpus = num_gpus
         self.local_cache = local_cache
+        self.immediate_gc = immediate_gc
 
         self.compute_imp = cupy_compute.ComputeCls()
-        self.dist_dict = {}   # Dict[(object_id, actor_id) -> actor_id]
+        self.dist_dict = defaultdict(dict)   # Dict[array_id -> Dict[actor_id -> array]]
         super().__init__()
 
     def put(self, x):
@@ -139,7 +141,7 @@ class CupyParallelSystem(BaseGPUSystem):
         return object_id
 
     def call_compute_interface(self, name, *args, **kwargs):
-        # Make device placement scheduling policy
+        # Make device placement decisions
         syskwargs = kwargs.pop('syskwargs')
         if name == 'bop':
             dst_actor = None
@@ -161,16 +163,18 @@ class CupyParallelSystem(BaseGPUSystem):
         with self.cp.cuda.Device(dst_actor):
             ret = getattr(self.compute_imp, name)(*args, **kwargs)
 
-        ret = self._register_new_array(ret, dst_actor)
-
-        self.dist_dict = {}
+        if self.immediate_gc:
+            self.dist_dict = defaultdict(dict)
+        else:
+            ret = self._register_new_array(ret, dst_actor)
+            self._gc()
 
         return ret
 
     def _distribute_to(self, arr, dst_actor):
         if self.local_cache:
-            arr_hash = (arr.data.device_id, arr.data.mem, arr.data.ptr)
-            ret = self.dist_dict.get((arr_hash, dst_actor), None)
+            arr_hash = self._get_array_hash(arr)
+            ret = self.dist_dict[arr_hash].get(dst_actor, None)
             if ret is None:
                 if arr.data.device_id == dst_actor:
                     ret = arr
@@ -178,25 +182,35 @@ class CupyParallelSystem(BaseGPUSystem):
                     # print(f"Copy {arr.shape} from {arr.data.device_id} to {dst_actor}")
                     with self.cp.cuda.Device(dst_actor):
                         ret = self.cp.asarray(arr)
-                self.dist_dict[(arr_hash, dst_actor)] = ret
-            return ret
+                    self.dist_dict[arr_hash][dst_actor] = ret
         else:
             if arr.data.device_id == dst_actor:
                 ret = arr
             else:
-                # print(f"Copy {arr.shape} from {arr.data.device_id} to {dst_actor}")
                 with self.cp.cuda.Device(dst_actor):
                     ret = self.cp.asarray(arr)
 
         return ret
 
+    def _get_array_hash(self, arr):
+        return (arr.data.device_id, arr.data.mem, arr.data.ptr)
+
     def _register_new_array(self, arr, dst_actor):
         if self.local_cache:
-            arr_hash = (arr.data.device_id, arr.data.mem, arr.data.ptr)
-            self.dist_dict[(arr_hash, dst_actor)] = arr
+            self.dist_dict[self._get_array_hash(arr)][dst_actor] = arr
             return arr
         else:
             return arr
+
+    def _gc(self):
+        to_delete = []
+        live_ct = 0
+        for arr_hash, actor_dict in self.dist_dict.items():
+            if all(len(gc.get_referrers(k)) <= 2 for k in actor_dict.values()):
+                to_delete.append(arr_hash)
+            live_ct += 1
+        for arr_hash in to_delete:
+            del self.dist_dict[arr_hash]
 
     def shutdown(self):
         mempool = self.cp.get_default_memory_pool()
@@ -548,10 +562,20 @@ class GPUActorSystem(BaseGPUSystem):
         return obj_ref
 
     def call_compute_interface(self, name, *args, **kwargs) -> ObjectRef:
+        # Make device placement decisions
         syskwargs = kwargs.pop('syskwargs')
-        gid = get_flatten_id(syskwargs['grid_entry'], syskwargs['grid_shape'])
-        actor_id = gid % len(self.gpu_actors)
-        dst_actor = self.gpu_actors[actor_id]
+        if name == 'bop':
+            dst_actor = None
+            for arg in itertools.chain(args, kwargs.values()):
+                if isinstance(arg, ObjectRef):
+                    dst_actor = self.obj_ref_to_owner[arg]
+                    break
+        else:
+            gid = get_flatten_id(syskwargs['grid_entry'], syskwargs['grid_shape'])
+            actor_id = gid % len(self.gpu_actors)
+            dst_actor = self.gpu_actors[actor_id]
+
+        print(f"CupyActorSystem::call compute {name} on {self.gpu_actors.index(dst_actor)}")
 
         args = [self._distribute_to(v, dst_actor)
                 if isinstance(v, ObjectRef) else v for v in args]
