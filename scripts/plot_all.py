@@ -7,6 +7,7 @@ method_order_list = [
     #"CupySerialSystem",
     #"CupyRaySystem",
     "CupyParallelSystem",
+    "CupyNcclActorSystem",
 ]
 
 
@@ -21,6 +22,7 @@ def method2color(method):
 show_name_table = {
     #"CupyRaySystem": "Cupy + ObjectStore",
     "CupyParallelSystem": "Ours (1 node, 4 GPUs)",
+    "CupyNcclActorSystem": "Ours (2 nodes, 8 GPUs)",
 }
 
 
@@ -179,7 +181,11 @@ def read_data(in_file):
         library, N, cost, cv = items
         N, cost, cv = [eval(x) for x in [N, cost, cv]]
 
-        workload_name = "%.1f GB" % (N * 1000 * 4 / 1e9)
+        gb = N * 1000 * 4 / 1e9
+        if gb < 1:
+            workload_name = "%.1f GB" % gb
+        else:
+            workload_name = "%.0f GB" % gb
 
         if cost < 0:
             continue
