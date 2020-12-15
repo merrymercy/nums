@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 method_order_list = [
     "Numpy",
     "Cupy",
-    "CupySerialSystem",
-    "CupyRaySystem",
+    #"CupySerialSystem",
+    #"CupyRaySystem",
     "CupyParallelSystem",
 ]
 
@@ -19,8 +19,8 @@ def method2color(method):
 
 
 show_name_table = {
-    "CupyRaySystem": "Cupy + ObjectStore",
-    "CupyParallelSystem": "Cupy + Actor",
+    #"CupyRaySystem": "Cupy + ObjectStore",
+    "CupyParallelSystem": "Ours (1 node, 4 GPUs)",
 }
 
 
@@ -137,8 +137,9 @@ def draw_grouped_bar_chart(
         from matplotlib.ticker import FormatStrFormatter
 
         ax.set_yticklabels(ax.get_yticks(), fontsize=fontsize)
-        ax.yaxis.set_major_formatter(FormatStrFormatter("%.1f"))
-        ax.yaxis.grid(linewidth=0.4, linestyle="dotted")  # draw grid line
+        ax.yaxis.set_major_formatter(FormatStrFormatter("%.2f"))
+        ax.yaxis.grid(True)
+        #ax.grid(True)
         ax.set_axisbelow(True)  # grid lines are behind the rest
         ax.tick_params(bottom=False, top=False, right=False)
 
@@ -182,6 +183,8 @@ def read_data(in_file):
 
         if cost < 0:
             continue
+        if library not in method_order_list:
+            continue
 
         if workload_name not in data:
             data[workload_name] = {}
@@ -194,14 +197,17 @@ def read_data(in_file):
 if __name__ == "__main__":
     data = read_data("result_bop.csv")
     draw_grouped_bar_chart(
-        data, legend_nrow=1, title="Compute $X^TX$", yscale_log=True, output="bop.png"
+        data, legend_nrow=1, title="Compute $X^TX$",
+        yscale_log=True,
+        output="bop.png",
+        yticks=[0.0625, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0],
     )
 
-    data = read_data("result_lr.csv")
-    draw_grouped_bar_chart(
-        data,
-        legend_nrow=1,
-        title="One Logistic Regression Training Step",
-        yscale_log=True,
-        output="lr.png",
-    )
+    #data = read_data("result_lr.csv")
+    #draw_grouped_bar_chart(
+    #    data,
+    #    legend_nrow=1,
+    #    title="One Logistic Regression Training Step",
+    #    yscale_log=True,
+    #    output="lr.png",
+    #)
