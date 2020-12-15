@@ -213,7 +213,8 @@ class CupyParallelSystem(BaseGPUSystem):
 
     def delete(self, arr):
         if not self.immediate_gc:
-            del self.dist_dict[self._get_array_hash(arr)]
+            if self.dist_dict is not None:
+                del self.dist_dict[self._get_array_hash(arr)]
 
     def shutdown(self):
         self.dist_dict = None
