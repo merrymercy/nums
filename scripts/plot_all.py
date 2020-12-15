@@ -177,6 +177,8 @@ def read_data(in_file):
     data = {}
 
     for line in open(in_file):
+        if line.startswith('#'):
+            continue
         items = [x.strip() for x in line.split(",")]
         library, N, cost, cv = items
         N, cost, cv = [eval(x) for x in [N, cost, cv]]
@@ -204,16 +206,15 @@ if __name__ == "__main__":
     data = read_data("result_bop.csv")
     draw_grouped_bar_chart(
         data, legend_nrow=1, title="Compute $X^TX$",
-        yscale_log=True,
         output="bop.png",
+        yscale_log=True,
         yticks=[0.0625, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0],
     )
 
-    #data = read_data("result_lr.csv")
-    #draw_grouped_bar_chart(
-    #    data,
-    #    legend_nrow=1,
-    #    title="One Logistic Regression Training Step",
-    #    yscale_log=True,
-    #    output="lr.png",
-    #)
+    data = read_data("result_lr.csv")
+    draw_grouped_bar_chart(
+        data, legend_nrow=1, title="One Logistic Regression Training Step",
+        output="lr.png",
+        yscale_log=True,
+        yticks=[0.0625, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0],
+    )
