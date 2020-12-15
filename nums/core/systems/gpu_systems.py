@@ -106,6 +106,15 @@ class CupySerialSystem(SerialSystem):
 ##############################################################
 ########## ParallelSystem: Parallel implementation ###########
 ##############################################################
+class CupySystemArrRef:
+    def __init__(self, cp_arr, system):
+        self.cp_arr = cp_arr
+        self.system = system
+
+    def __del__(self):
+        self.system.delete(self.cp_arr)
+
+
 class CupyParallelSystem(BaseGPUSystem):
     def __init__(self, num_gpus, local_cache=True, immediate_gc=True):
         import cupy as cp
@@ -128,17 +137,18 @@ class CupyParallelSystem(BaseGPUSystem):
         for actor_id in range(1, self.num_gpus):
             self._distribute_to(ret, actor_id)
 
-        return ret
+        return CupySystemArrRef(ret, self)
 
     def get(self, x):
         if isinstance(x, list):
-            return [a.get() for a in x]
+            return [a.cp_arr.get() for a in x]
         else:
-            return x.get()
+            return x.cp_arr.get()
 
-    def touch(self, object_id, syskwargs):
-        object_id.device.synchronize()
-        return object_id
+    def touch(self, x, syskwargs):
+        x = x.cp_arr
+        x.device.synchronize()
+        return x
 
     def call_compute_interface(self, name, *args, **kwargs):
         # Make device placement decisions
@@ -146,8 +156,8 @@ class CupyParallelSystem(BaseGPUSystem):
         if name == 'bop':
             dst_actor = None
             for arg in itertools.chain(args, kwargs.values()):
-                if isinstance(arg, self.cp.ndarray):
-                    dst_actor = arg.data.device_id
+                if isinstance(arg, CupySystemArrRef):
+                    dst_actor = arg.cp_arr.data.device_id
                     break
         else:
             gid = get_flatten_id(syskwargs['grid_entry'], syskwargs['grid_shape'])
@@ -155,10 +165,10 @@ class CupyParallelSystem(BaseGPUSystem):
 
         #print(f"CupyParallelSystem::call compute {name} on {dst_actor}")
 
-        args = [self._distribute_to(v, dst_actor)
-                if isinstance(v, self.cp.ndarray) else v for v in args]
-        kwargs = {k: self._distribute_to(v, dst_actor)
-                if isinstance(v, self.cp.ndarray) else v for k, v in kwargs.items()}
+        args = [self._distribute_to(v.cp_arr, dst_actor)
+                if isinstance(v, CupySystemArrRef) else v for v in args]
+        kwargs = {k: self._distribute_to(v.cp_arr, dst_actor)
+                if isinstance(v, CupySystemArrRef) else v for k, v in kwargs.items()}
 
         with self.cp.cuda.Device(dst_actor):
             ret = getattr(self.compute_imp, name)(*args, **kwargs)
@@ -167,10 +177,8 @@ class CupyParallelSystem(BaseGPUSystem):
             self.dist_dict = defaultdict(dict)
         else:
             ret = self._register_new_array(ret, dst_actor)
-            if len(self.dist_dict) > 100:
-                self._gc()
 
-        return ret
+        return CupySystemArrRef(ret, self)
 
     def _distribute_to(self, arr, dst_actor):
         if self.local_cache:
@@ -203,13 +211,9 @@ class CupyParallelSystem(BaseGPUSystem):
         else:
             return arr
 
-    def _gc(self):
-        to_delete = []
-        for arr_hash, actor_dict in self.dist_dict.items():
-            if all(len(gc.get_referrers(k)) <= 2 for k in actor_dict.values()):
-                to_delete.append(arr_hash)
-        for arr_hash in to_delete:
-            del self.dist_dict[arr_hash]
+    def delete(self, arr):
+        if not self.immediate_gc:
+            del self.dist_dict[self._get_array_hash(arr)]
 
     def shutdown(self):
         self.dist_dict = None
